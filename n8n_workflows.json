@@ -1,0 +1,67 @@
+{
+  "name": "ComplyFlow Workflows",
+  "workflows": [
+    {
+      "name": "Generate Content",
+      "nodes": [
+        {
+          "parameters": {
+            "httpMethod": "POST",
+            "path": "generate-content",
+            "options": {}
+          },
+          "name": "Webhook",
+          "type": "n8n-nodes-base.webhook",
+          "typeVersion": 1,
+          "position": [100, 300]
+        },
+        {
+          "parameters": {
+            "prompt": "Write a compliance-safe financial {{json.body.content_type}} about {{json.body.topic}}. Target audience: {{json.body.instructions}}. Avoid guarantees. Use 'historical data suggests' instead of 'will'.",
+            "model": "gpt-4"
+          },
+          "name": "OpenAI",
+          "type": "n8n-nodes-base.openAi",
+          "typeVersion": 1,
+          "position": [300, 300]
+        },
+        {
+          "parameters": {
+            "tableId": "content_versions",
+            "columns": "request_id, body, title, generated_by",
+            "values": "{{json.request_id}}, {{json.text}}, {{json.title}}, 'ai'"
+          },
+          "name": "Supabase Update",
+          "type": "n8n-nodes-base.supabase",
+          "typeVersion": 1,
+          "position": [500, 300]
+        }
+      ]
+    },
+    {
+      "name": "Notify Compliance",
+      "nodes": [
+        {
+          "parameters": {
+            "httpMethod": "POST",
+            "path": "notify-compliance"
+          },
+          "name": "Webhook",
+          "type": "n8n-nodes-base.webhook",
+          "position": [100, 300]
+        },
+        {
+          "parameters": {
+            "fromEmail": "system@complyflow.com",
+            "toEmail": "compliance@firm.com",
+            "subject": "New Content for Review",
+            "text": "Advisor {{json.body.advisor_name}} submitted content: {{json.body.title}}"
+          },
+          "name": "Send Email",
+          "type": "n8n-nodes-base.emailSend",
+          "position": [300, 300]
+        }
+      ]
+    }
+  ]
+}
