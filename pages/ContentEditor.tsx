@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
-import { triggerContentGeneration } from '../services/supabaseClient';
-import { UserRole, ContentStatus, ContentVersion, ComplianceReview } from '../types';
+import { triggerContentGeneration, supabase } from '../services/supabaseClient';
+import { UserRole, ContentStatus, ContentVersion, ComplianceReview, Profile } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
   Wand2,
@@ -41,12 +41,15 @@ const EXTENSION_STEPS = [
 
 interface ContentEditorProps {
   userRole: UserRole;
+  profile: Profile | null;
 }
 
-const ContentEditor: React.FC<ContentEditorProps> = ({ userRole }) => {
+const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { id } = useParams();
+  const { id } = useParams(); // contentRequestId
+  const [requestId, setRequestId] = useState<string | null>(id || null);
+  const clientId = searchParams.get('clientId');
 
   // State
   const [topic, setTopic] = useState(searchParams.get('topic') || '');
@@ -150,6 +153,11 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole }) => {
   }, [isExtending]);
 
   const handleGenerate = async () => {
+    if (!profile?.org_id) {
+      alert("Missing profile or organization context. Please ensure you are logged in correctly.");
+      return;
+    }
+
     setIsGenerating(true);
     setGenerationStep(0);
     setError(null);
@@ -203,15 +211,58 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole }) => {
       // Brief delay so user sees the "all done" state before content appears
       await new Promise(resolve => setTimeout(resolve, 1000));
 
-      setContent({
-        id: 'new-v1',
-        version_number: 1,
-        generated_by: 'ai',
-        title: result.title,
-        body: result.body,
-        disclaimers: result.disclaimers,
-        created_at: new Date().toISOString()
-      });
+      // --- SAVE TO DATABASE ---
+      let currentRequestId = requestId;
+
+      if (!currentRequestId) {
+        // Create new content request
+        const { data: requestData, error: requestError } = await supabase
+          .from('content_requests')
+          .insert({
+            topic_text: topic,
+            content_type: contentType,
+            status: ContentStatus.DRAFT,
+            advisor_id: profile.id,
+            org_id: profile.org_id,
+            client_id: clientId
+          })
+          .select()
+          .single();
+
+        if (requestError) throw requestError;
+        currentRequestId = requestData.id;
+        setRequestId(currentRequestId);
+      }
+
+      // Insert version
+      const { data: versionData, error: versionError } = await supabase
+        .from('content_versions')
+        .insert({
+          request_id: currentRequestId,
+          version_number: 1, // Logic for incrementing can be added later
+          generated_by: 'ai',
+          title: result.title,
+          body: result.body,
+          disclaimers: result.disclaimers
+        })
+        .select()
+        .single();
+
+      if (versionError) throw versionError;
+
+      // Update current version pointer
+      await supabase
+        .from('content_requests')
+        .update({ current_version_id: versionData.id })
+        .eq('id', currentRequestId);
+
+      setContent(versionData);
+
+      // Update URL without reloading if it's a new request
+      if (!id) {
+        window.history.replaceState(null, '', `#/content/${currentRequestId}`);
+      }
+
     } catch (e: any) {
       console.error(e);
       setError(e.message || "An error occurred while generating content. Please check your API keys and try again.");
@@ -384,7 +435,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole }) => {
 
   // --- Select & Fix: Rewrite Handler ---
   const handleRewrite = async (mode: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance') => {
-    if (!selectedText || !selectionRange || !content) return;
+    if (!selectedText || !selectionRange || !content || !requestId) return;
 
     setIsRewriting(true);
     setError(null);
@@ -416,23 +467,42 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole }) => {
         selectionRange.deleteContents();
         selectionRange.insertNode(highlightSpan);
 
-        // Sync back to state
+        // --- SAVE TO DATABASE ---
         if (editorRef.current) {
-          setContent({
-            ...content,
-            body: editorRef.current.innerHTML,
-          });
+          const newBody = editorRef.current.innerHTML;
+
+          // Insert new version
+          const { data: versionData, error: versionError } = await supabase
+            .from('content_versions')
+            .insert({
+              request_id: requestId,
+              version_number: (content.version_number || 1) + 1,
+              generated_by: 'ai',
+              title: content.title,
+              body: newBody,
+              disclaimers: content.disclaimers
+            })
+            .select()
+            .single();
+
+          if (versionError) throw versionError;
+
+          // Update current version pointer
+          await supabase
+            .from('content_requests')
+            .update({ current_version_id: versionData.id })
+            .eq('id', requestId);
+
+          setContent(versionData);
         }
 
         // Remove highlight after animation
         setTimeout(() => {
+          // Since we might have updated state and re-rendered, highlightSpan might be stale
+          // but for simple cases it works. For a truly robust editor we'd use a better approach.
           if (highlightSpan.parentNode) {
             const textNode = document.createTextNode(highlightSpan.textContent || '');
             highlightSpan.parentNode.replaceChild(textNode, highlightSpan);
-            // Sync again
-            if (editorRef.current) {
-              setContent(prev => prev ? { ...prev, body: editorRef.current!.innerHTML } : null);
-            }
           }
         }, 4500);
       }

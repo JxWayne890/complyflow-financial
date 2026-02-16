@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { Client, ClientStatus, AudienceType, ContentStatus, ContentType } from '../types';
+import { Client, ClientStatus, AudienceType, ContentStatus, ContentType, Profile } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
     ChevronLeft,
@@ -157,7 +157,11 @@ const formatDateTime = (dateString: string) => new Date(dateString).toLocaleDate
 
 // --- Component ---
 
-const ClientDetail: React.FC = () => {
+interface ClientDetailProps {
+    profile: Profile | null;
+}
+
+const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
     const { id } = useParams();
     const navigate = useNavigate();
     const [activeTab, setActiveTab] = useState<TabKey>('overview');
@@ -237,8 +241,8 @@ const ClientDetail: React.FC = () => {
                             key={tab.key}
                             onClick={() => setActiveTab(tab.key)}
                             className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${activeTab === tab.key
-                                    ? 'border-primary-600 text-primary-700'
-                                    : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+                                ? 'border-primary-600 text-primary-700'
+                                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
                                 }`}
                         >
                             {tab.icon}

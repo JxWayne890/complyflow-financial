@@ -10,17 +10,19 @@ import {
   X,
   Bell,
   PenTool,
-  ChevronDown
+  ChevronDown,
+  History as HistoryIcon
 } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
-import { UserRole } from '../types';
+import { UserRole, Profile } from '../types';
 
 interface LayoutProps {
   children: React.ReactNode;
   userRole: UserRole;
+  profile: Profile | null;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, userRole }) => {
+const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
@@ -35,7 +37,7 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole }) => {
     { label: 'Topics Library', path: '/topics', icon: <PenTool size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
     { label: 'Clients', path: '/clients', icon: <Users size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
     { label: 'Review Queue', path: '/compliance', icon: <ShieldCheck size={18} />, roles: [UserRole.COMPLIANCE, UserRole.ADMIN] },
-    { label: 'Settings', path: '/settings', icon: <Settings size={18} />, roles: [UserRole.ADMIN] },
+    { label: 'Changelog', path: '/changelog', icon: <HistoryIcon size={18} />, roles: [UserRole.ADMIN, UserRole.ADVISOR, UserRole.COMPLIANCE] },
   ];
 
   const filteredNav = navItems.filter(item => item.roles.includes(userRole));
@@ -54,7 +56,7 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole }) => {
 
           <div className="px-3 py-2 bg-slate-50 rounded-xl mb-6 border border-slate-100">
             <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Organization</p>
-            <p className="text-sm font-medium text-slate-800 truncate">Acme Financial Partners</p>
+            <p className="text-sm font-medium text-slate-800 truncate">{profile?.org_id ? 'Your Organization' : 'No Org Connected'}</p>
           </div>
         </div>
 
@@ -66,8 +68,8 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole }) => {
                 key={item.path}
                 to={item.path}
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${isActive
-                    ? 'bg-primary-50 text-primary-700'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                  ? 'bg-primary-50 text-primary-700'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
                   }`}
               >
                 <span className={isActive ? 'text-primary-600' : 'text-slate-400'}>{item.icon}</span>
@@ -138,11 +140,11 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole }) => {
             </div>
             <div className="flex items-center gap-3 pl-6 border-l border-slate-200">
               <div className="hidden sm:flex flex-col text-right">
-                <span className="text-sm font-semibold text-slate-900">Alex Morgan</span>
+                <span className="text-sm font-semibold text-slate-900">{profile?.name || 'User'}</span>
                 <span className="text-xs text-slate-500 font-medium capitalize">{userRole}</span>
               </div>
               <div className="h-9 w-9 bg-slate-200 rounded-full flex items-center justify-center text-slate-600 font-bold border-2 border-white shadow-sm ring-1 ring-slate-100">
-                AM
+                {(profile?.name || 'U').split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
               </div>
             </div>
           </div>

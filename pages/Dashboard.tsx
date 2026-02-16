@@ -1,14 +1,15 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { UserRole, ContentStatus } from '../types';
+import { UserRole, ContentStatus, Profile } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import { Plus, ArrowRight, Activity, Clock, ShieldCheck, FileText, BarChart3 } from 'lucide-react';
 
 interface DashboardProps {
   userRole: UserRole;
+  profile: Profile | null;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ userRole }) => {
+const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
   // Mock data
   const recentItems = [
     { id: '1', title: 'Q4 Market Outlook', type: 'Blog Article', status: ContentStatus.IN_REVIEW, date: 'Oct 24, 2023' },

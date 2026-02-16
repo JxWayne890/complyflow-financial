@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Client, ClientStatus, AudienceType } from '../types';
+import { Client, ClientStatus, AudienceType, Profile } from '../types';
 import {
     Search,
     Plus,
@@ -135,7 +135,7 @@ const getSocialIcon = (platform: string) => {
     }
 };
 
-const ClientsList: React.FC = () => {
+const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
     const [searchQuery, setSearchQuery] = useState('');
     const [filterStatus, setFilterStatus] = useState<StatusFilter>('all');
 
@@ -205,8 +205,8 @@ const ClientsList: React.FC = () => {
                             key={tab.key}
                             onClick={() => setFilterStatus(tab.key)}
                             className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${filterStatus === tab.key
-                                    ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                    : 'text-slate-600 hover:bg-slate-50 border border-transparent'
+                                ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                                : 'text-slate-600 hover:bg-slate-50 border border-transparent'
                                 }`}
                         >
                             {tab.label}

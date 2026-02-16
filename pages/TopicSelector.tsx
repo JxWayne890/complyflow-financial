@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, ChevronRight, TrendingUp, DollarSign, Heart, Briefcase, Zap, Shield, Landmark, Building2, Flame, Leaf, Atom, PiggyBank, Users, BookOpen, Scale, Sparkles, Loader2, CheckCircle2, Brain, ShieldCheck, Lightbulb, ListChecks, FileCheck } from 'lucide-react';
 import { triggerTopicGeneration } from '../services/supabaseClient';
+import { Profile } from '../types';
 
 // Generation progress steps
 const TOPIC_GEN_STEPS = [
@@ -50,7 +51,7 @@ interface TopicItem {
   audience?: string;
 }
 
-const TopicSelector: React.FC = () => {
+const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
@@ -311,19 +312,19 @@ const TopicSelector: React.FC = () => {
                 <div
                   key={step.id}
                   className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-all duration-500 ${allDone
-                      ? 'bg-emerald-50/50 border-emerald-100'
-                      : isActive
-                        ? 'bg-violet-50/60 border-violet-200 shadow-sm'
-                        : isComplete
-                          ? 'bg-emerald-50/40 border-emerald-100'
-                          : 'bg-slate-50/50 border-slate-100 opacity-50'
+                    ? 'bg-emerald-50/50 border-emerald-100'
+                    : isActive
+                      ? 'bg-violet-50/60 border-violet-200 shadow-sm'
+                      : isComplete
+                        ? 'bg-emerald-50/40 border-emerald-100'
+                        : 'bg-slate-50/50 border-slate-100 opacity-50'
                     }`}
                 >
                   <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all duration-500 ${(allDone || isComplete)
-                      ? 'bg-emerald-500 text-white'
-                      : isActive
-                        ? 'bg-violet-500 text-white shadow-sm'
-                        : 'bg-slate-200 text-slate-400'
+                    ? 'bg-emerald-500 text-white'
+                    : isActive
+                      ? 'bg-violet-500 text-white shadow-sm'
+                      : 'bg-slate-200 text-slate-400'
                     }`}>
                     {(allDone || isComplete) ? (
                       <CheckCircle2 size={16} />
@@ -334,10 +335,10 @@ const TopicSelector: React.FC = () => {
                     )}
                   </div>
                   <p className={`text-sm font-medium flex-1 transition-colors duration-500 ${(allDone || isComplete)
-                      ? 'text-emerald-700'
-                      : isActive
-                        ? 'text-violet-900'
-                        : 'text-slate-400'
+                    ? 'text-emerald-700'
+                    : isActive
+                      ? 'text-violet-900'
+                      : 'text-slate-400'
                     }`}>
                     {step.label}
                   </p>
