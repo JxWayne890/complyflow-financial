@@ -1,11 +1,12 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
+import { supabase } from '../services/supabaseClient';
 import { ContentStatus, ContentType } from '../types';
 import StatusBadge from '../components/StatusBadge';
-import { 
-  Search, 
-  Grid3X3, 
-  List, 
+import {
+  Search,
+  Grid3X3,
+  List,
   Plus,
   FileText,
   Linkedin,
@@ -17,125 +18,62 @@ import {
   Eye,
   Pencil,
   Trash2,
-  Filter
+  Filter,
+  Loader2
 } from 'lucide-react';
 
-// Mock data for demonstration
-const mockContent = [
-  {
-    id: '1',
-    title: 'Navigating Fixed Income in 2024',
-    topic_text: 'How rising rates impact bond portfolios',
-    content_type: ContentType.BLOG,
-    status: ContentStatus.IN_REVIEW,
-    updated_at: '2024-01-15T10:30:00Z',
-    excerpt: 'Bond yields are attractive again after years of near-zero rates. Here is what investors should know...'
-  },
-  {
-    id: '2',
-    title: 'Retirement Planning Essentials',
-    topic_text: 'Retirement planning 101 for professionals',
-    content_type: ContentType.LINKEDIN,
-    status: ContentStatus.APPROVED,
-    updated_at: '2024-01-12T14:20:00Z',
-    excerpt: 'Planning for retirement is one of the most important financial decisions you will make...'
-  },
-  {
-    id: '3',
-    title: 'Tax Harvesting Strategies',
-    topic_text: 'Year-end tax loss harvesting tips',
-    content_type: ContentType.VIDEO_SCRIPT,
-    status: ContentStatus.DRAFT,
-    updated_at: '2024-01-10T09:15:00Z',
-    excerpt: 'Tax-loss harvesting can be a powerful tool in your investment strategy...'
-  },
-  {
-    id: '4',
-    title: 'Market Volatility Update',
-    topic_text: 'Managing client expectations during volatility',
-    content_type: ContentType.FACEBOOK,
-    status: ContentStatus.CHANGES_REQUESTED,
-    updated_at: '2024-01-08T16:45:00Z',
-    excerpt: 'Market fluctuations are normal. Here is how to stay focused on long-term goals...'
-  },
-  {
-    id: '5',
-    title: 'Estate Planning Basics',
-    topic_text: 'Introduction to estate planning',
-    content_type: ContentType.BLOG,
-    status: ContentStatus.APPROVED,
-    updated_at: '2024-01-05T11:00:00Z',
-    excerpt: 'Estate planning ensures your assets are distributed according to your wishes...'
-  },
-  {
-    id: '6',
-    title: 'Alternative Investments Overview',
-    topic_text: 'Understanding alternative investment options',
-    content_type: ContentType.BLOG,
-    status: ContentStatus.SUBMITTED,
-    updated_at: '2024-01-03T08:30:00Z',
-    excerpt: 'Alternative investments can provide portfolio diversification beyond traditional stocks and bonds...'
-  }
-];
-
-type ViewMode = 'grid' | 'list';
-type FilterStatus = 'all' | 'draft' | 'in_review' | 'approved';
+// Real Data Type
+interface ContentItem {
+  id: string;
+  title: string;
+  topic_text: string;
+  content_type: ContentType;
+  status: ContentStatus;
+  updated_at: string;
+  excerpt: string;
+}
 
 const getContentTypeIcon = (type: ContentType) => {
   switch (type) {
-    case ContentType.BLOG:
-      return <FileText size={16} />;
-    case ContentType.LINKEDIN:
-      return <Linkedin size={16} />;
-    case ContentType.FACEBOOK:
-      return <Facebook size={16} />;
-    case ContentType.VIDEO_SCRIPT:
-      return <Video size={16} />;
-    case ContentType.AD:
-      return <Megaphone size={16} />;
-    default:
-      return <FileText size={16} />;
+    case ContentType.BLOG: return <FileText size={16} />;
+    case ContentType.LINKEDIN: return <Linkedin size={16} />;
+    case ContentType.FACEBOOK: return <Facebook size={16} />;
+    case ContentType.VIDEO_SCRIPT: return <Video size={16} />;
+    case ContentType.AD: return <Megaphone size={16} />;
+    default: return <FileText size={16} />;
   }
 };
 
 const getContentTypeLabel = (type: ContentType) => {
   switch (type) {
-    case ContentType.BLOG:
-      return 'Blog Article';
-    case ContentType.LINKEDIN:
-      return 'LinkedIn Post';
-    case ContentType.FACEBOOK:
-      return 'Facebook Post';
-    case ContentType.VIDEO_SCRIPT:
-      return 'Video Script';
-    case ContentType.AD:
-      return 'Advertisement';
-    default:
-      return 'Content';
+    case ContentType.BLOG: return 'Blog Article';
+    case ContentType.LINKEDIN: return 'LinkedIn Post';
+    case ContentType.FACEBOOK: return 'Facebook Post';
+    case ContentType.VIDEO_SCRIPT: return 'Video Script';
+    case ContentType.AD: return 'Advertisement';
+    default: return 'Content';
   }
 };
 
 const getContentTypeColor = (type: ContentType) => {
   switch (type) {
-    case ContentType.BLOG:
-      return 'bg-blue-50 text-blue-600';
-    case ContentType.LINKEDIN:
-      return 'bg-sky-50 text-sky-600';
-    case ContentType.FACEBOOK:
-      return 'bg-indigo-50 text-indigo-600';
-    case ContentType.VIDEO_SCRIPT:
-      return 'bg-purple-50 text-purple-600';
-    case ContentType.AD:
-      return 'bg-orange-50 text-orange-600';
-    default:
-      return 'bg-slate-50 text-slate-600';
+    case ContentType.BLOG: return 'bg-blue-50 text-blue-600';
+    case ContentType.LINKEDIN: return 'bg-sky-50 text-sky-600';
+    case ContentType.FACEBOOK: return 'bg-indigo-50 text-indigo-600';
+    case ContentType.VIDEO_SCRIPT: return 'bg-purple-50 text-purple-600';
+    case ContentType.AD: return 'bg-orange-50 text-orange-600';
+    default: return 'bg-slate-50 text-slate-600';
   }
 };
 
 const formatDate = (dateString: string) => {
+  if (!dateString) return '';
   const date = new Date(dateString);
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 };
+
+type ViewMode = 'grid' | 'list';
+type FilterStatus = 'all' | 'draft' | 'in_review' | 'approved';
 
 const MyLibrary: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -143,12 +81,88 @@ const MyLibrary: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('all');
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
 
+  const [content, setContent] = useState<ContentItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchContent();
+  }, []);
+
+  const fetchContent = async () => {
+    setLoading(true);
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) return;
+
+      // Fetch requests and their latest version
+      const { data, error } = await supabase
+        .from('content_requests')
+        .select(`
+                id, topic, status, updated_at, created_at,
+                content_versions (
+                    id, version_number, content, created_at
+                )
+            `)
+        .order('updated_at', { ascending: false });
+
+      if (error) throw error;
+
+      if (data) {
+        const formattedContent: ContentItem[] = data.map((item: any) => {
+          // Find latest version
+          const versions = item.content_versions || [];
+          const latestVersion = versions.sort((a: any, b: any) =>
+            new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+          )[0];
+
+          let title = item.topic; // Default title is topic
+          let excerpt = '';
+          let type = ContentType.BLOG; // Default type logic needs refinement
+
+          if (latestVersion && latestVersion.content) {
+            try {
+              const contentJson = typeof latestVersion.content === 'string'
+                ? JSON.parse(latestVersion.content)
+                : latestVersion.content;
+
+              title = contentJson.title || title;
+              excerpt = contentJson.content?.substring(0, 150) + '...' || '';
+
+              // Infer type from content structure or metadata if available
+              // For now we default to BLOG unless we store it in content_requests
+              // We really should store 'type' in content_requests.
+              // Assuming the generated content might have a type field or we guess.
+              if (contentJson.type) type = contentJson.type as ContentType;
+            } catch (e) {
+              console.error("Error parsing content JSON", e);
+            }
+          }
+
+          return {
+            id: item.id,
+            title: title,
+            topic_text: item.topic,
+            content_type: type,
+            status: item.status as ContentStatus,
+            updated_at: item.updated_at || item.created_at,
+            excerpt: excerpt
+          };
+        });
+        setContent(formattedContent);
+      }
+    } catch (error) {
+      console.error('Error fetching content:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const filteredContent = useMemo(() => {
-    return mockContent.filter(item => {
+    return content.filter(item => {
       // Search filter
       const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                           item.topic_text.toLowerCase().includes(searchQuery.toLowerCase());
-      
+        item.topic_text.toLowerCase().includes(searchQuery.toLowerCase());
+
       // Status filter
       let matchesStatus = true;
       if (filterStatus === 'draft') {
@@ -161,14 +175,14 @@ const MyLibrary: React.FC = () => {
 
       return matchesSearch && matchesStatus;
     });
-  }, [searchQuery, filterStatus]);
+  }, [searchQuery, filterStatus, content]);
 
   const statusCounts = useMemo(() => ({
-    all: mockContent.length,
-    draft: mockContent.filter(i => i.status === ContentStatus.DRAFT || i.status === ContentStatus.CHANGES_REQUESTED).length,
-    in_review: mockContent.filter(i => i.status === ContentStatus.IN_REVIEW || i.status === ContentStatus.SUBMITTED).length,
-    approved: mockContent.filter(i => i.status === ContentStatus.APPROVED).length
-  }), []);
+    all: content.length,
+    draft: content.filter(i => i.status === ContentStatus.DRAFT || i.status === ContentStatus.CHANGES_REQUESTED).length,
+    in_review: content.filter(i => i.status === ContentStatus.IN_REVIEW || i.status === ContentStatus.SUBMITTED).length,
+    approved: content.filter(i => i.status === ContentStatus.APPROVED).length
+  }), [content]);
 
   const filterTabs: { key: FilterStatus; label: string; count: number }[] = [
     { key: 'all', label: 'All Content', count: statusCounts.all },
@@ -176,6 +190,14 @@ const MyLibrary: React.FC = () => {
     { key: 'in_review', label: 'In Review', count: statusCounts.in_review },
     { key: 'approved', label: 'Approved', count: statusCounts.approved }
   ];
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-20">
+        <Loader2 className="animate-spin text-primary-600" size={32} />
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -187,8 +209,8 @@ const MyLibrary: React.FC = () => {
             Manage all your content in one place
           </p>
         </div>
-        <Link 
-          to="/topics" 
+        <Link
+          to="/topics"
           className="inline-flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors shadow-sm shadow-blue-600/20"
         >
           <Plus size={18} />
@@ -234,16 +256,14 @@ const MyLibrary: React.FC = () => {
             <button
               key={tab.key}
               onClick={() => setFilterStatus(tab.key)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${
-                filterStatus === tab.key 
-                  ? 'bg-primary-50 text-primary-700 border border-primary-200' 
+              className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${filterStatus === tab.key
+                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
                   : 'text-slate-600 hover:bg-slate-50 border border-transparent'
-              }`}
+                }`}
             >
               {tab.label}
-              <span className={`ml-2 px-1.5 py-0.5 rounded-full text-xs ${
-                filterStatus === tab.key ? 'bg-primary-100 text-primary-700' : 'bg-slate-100 text-slate-500'
-              }`}>
+              <span className={`ml-2 px-1.5 py-0.5 rounded-full text-xs ${filterStatus === tab.key ? 'bg-primary-100 text-primary-700' : 'bg-slate-100 text-slate-500'
+                }`}>
                 {tab.count}
               </span>
             </button>
@@ -262,7 +282,7 @@ const MyLibrary: React.FC = () => {
             {searchQuery ? 'Try adjusting your search or filters' : 'Get started by creating your first piece of content'}
           </p>
           {!searchQuery && (
-            <Link 
+            <Link
               to="/topics"
               className="inline-flex items-center gap-2 text-primary-600 hover:text-primary-700 font-medium text-sm"
             >
@@ -275,8 +295,8 @@ const MyLibrary: React.FC = () => {
         /* Grid View */
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
           {filteredContent.map(item => (
-            <div 
-              key={item.id} 
+            <div
+              key={item.id}
               className="group bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-lg hover:border-slate-300 transition-all duration-300"
             >
               {/* Card Header */}
@@ -287,7 +307,7 @@ const MyLibrary: React.FC = () => {
                     {getContentTypeLabel(item.content_type)}
                   </div>
                   <div className="relative">
-                    <button 
+                    <button
                       onClick={() => setActiveDropdown(activeDropdown === item.id ? null : item.id)}
                       className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
                     >
@@ -295,11 +315,11 @@ const MyLibrary: React.FC = () => {
                     </button>
                     {activeDropdown === item.id && (
                       <div className="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-slate-200 py-1 z-10 min-w-[140px]">
-                        <Link 
-                          to={`/content/${item.id}`}
+                        <Link
+                          to={`/create?Topic=${encodeURIComponent(item.topic_text)}&existingId=${item.id}`}
                           className="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
                         >
-                          <Eye size={14} /> View
+                          <Eye size={14} /> Open
                         </Link>
                         <button className="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 w-full text-left">
                           <Pencil size={14} /> Edit
@@ -311,15 +331,15 @@ const MyLibrary: React.FC = () => {
                     )}
                   </div>
                 </div>
-                
-                <Link to={`/content/${item.id}`}>
+
+                <Link to={`/create?Topic=${encodeURIComponent(item.topic_text)}&existingId=${item.id}`}>
                   <h3 className="text-lg font-semibold text-slate-900 mb-2 group-hover:text-primary-600 transition-colors line-clamp-2">
                     {item.title}
                   </h3>
                 </Link>
-                
+
                 <p className="text-sm text-slate-500 line-clamp-2 mb-4">
-                  {item.excerpt}
+                  {item.excerpt || item.topic_text}
                 </p>
               </div>
 
@@ -339,8 +359,8 @@ const MyLibrary: React.FC = () => {
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
           <div className="divide-y divide-slate-100">
             {filteredContent.map(item => (
-              <div 
-                key={item.id} 
+              <div
+                key={item.id}
                 className="group p-4 hover:bg-slate-50 transition-colors flex items-center gap-4"
               >
                 {/* Type Icon */}
@@ -351,8 +371,8 @@ const MyLibrary: React.FC = () => {
                 {/* Content Info */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
-                    <Link 
-                      to={`/content/${item.id}`}
+                    <Link
+                      to={`/create?Topic=${encodeURIComponent(item.topic_text)}&existingId=${item.id}`}
                       className="text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate"
                     >
                       {item.title}
@@ -373,8 +393,8 @@ const MyLibrary: React.FC = () => {
 
                 {/* Actions */}
                 <div className="flex items-center gap-1">
-                  <Link 
-                    to={`/content/${item.id}`}
+                  <Link
+                    to={`/create?Topic=${encodeURIComponent(item.topic_text)}&existingId=${item.id}`}
                     className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
                   >
                     <Eye size={18} />

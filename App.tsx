@@ -74,71 +74,32 @@ const App: React.FC = () => {
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
 
-        <Route path="/" element={
-          session ? (
-            <Layout userRole={userRole} profile={profile} setRoleOverride={setRoleOverride}>
-              <Dashboard userRole={userRole} profile={profile} />
-            </Layout>
-          ) : <Navigate to="/login" />
+        {/* Demo Mode: Allow access without session */}
+        <Route path="*" element={
+          <Layout
+            userRole={userRole}
+            profile={profile || {
+              id: 'demo-user',
+              name: 'Demo User',
+              email: 'demo@example.com',
+              role: UserRole.ADVISOR,
+              org_id: 'demo-org'
+            }}
+            setRoleOverride={setRoleOverride}
+          >
+            <Routes>
+              <Route path="/" element={<Dashboard userRole={userRole} profile={profile} />} />
+              <Route path="/topics" element={<TopicSelector profile={profile} />} />
+              <Route path="/create" element={<ContentEditor userRole={userRole} profile={profile} />} />
+              <Route path="/content/:id" element={<ContentEditor userRole={userRole} profile={profile} />} />
+              <Route path="/clients" element={<ClientsList profile={profile} />} />
+              <Route path="/clients/:id" element={<ClientDetail profile={profile} />} />
+              <Route path="/compliance" element={<Dashboard userRole={userRole} profile={profile} />} />
+              <Route path="/changelog" element={<Changelog />} />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </Layout>
         } />
-
-        <Route path="/topics" element={
-          session ? (
-            <Layout userRole={userRole} profile={profile} setRoleOverride={setRoleOverride}>
-              <TopicSelector profile={profile} />
-            </Layout>
-          ) : <Navigate to="/login" />
-        } />
-
-        <Route path="/create" element={
-          session ? (
-            <Layout userRole={userRole} profile={profile} setRoleOverride={setRoleOverride}>
-              <ContentEditor userRole={userRole} profile={profile} />
-            </Layout>
-          ) : <Navigate to="/login" />
-        } />
-
-        <Route path="/content/:id" element={
-          session ? (
-            <Layout userRole={userRole} profile={profile} setRoleOverride={setRoleOverride}>
-              <ContentEditor userRole={userRole} profile={profile} />
-            </Layout>
-          ) : <Navigate to="/login" />
-        } />
-
-        <Route path="/clients" element={
-          session ? (
-            <Layout userRole={userRole} profile={profile} setRoleOverride={setRoleOverride}>
-              <ClientsList profile={profile} />
-            </Layout>
-          ) : <Navigate to="/login" />
-        } />
-
-        <Route path="/clients/:id" element={
-          session ? (
-            <Layout userRole={userRole} profile={profile} setRoleOverride={setRoleOverride}>
-              <ClientDetail profile={profile} />
-            </Layout>
-          ) : <Navigate to="/login" />
-        } />
-
-        <Route path="/compliance" element={
-          session ? (
-            <Layout userRole={userRole} profile={profile} setRoleOverride={setRoleOverride}>
-              <Dashboard userRole={userRole} profile={profile} />
-            </Layout>
-          ) : <Navigate to="/login" />
-        } />
-
-        <Route path="/changelog" element={
-          session ? (
-            <Layout userRole={userRole} profile={profile} setRoleOverride={setRoleOverride}>
-              <Changelog />
-            </Layout>
-          ) : <Navigate to="/login" />
-        } />
-
-        <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </HashRouter>
   );

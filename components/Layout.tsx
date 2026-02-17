@@ -159,7 +159,14 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile, setRoleOve
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-slate-50">
+      <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-slate-50 relative">
+        {/* Demo Mode Banner */}
+        {profile?.id === 'demo-user' && (
+          <div className="bg-amber-100 text-amber-800 text-xs font-semibold py-1.5 text-center border-b border-amber-200">
+            Demo Mode Enabled — Features requiring authentication (like saving data) are disabled.
+          </div>
+        )}
+
         {/* Header */}
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 sm:px-8 z-10 shadow-sm">
           <div className="flex items-center gap-4">

@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
+import { supabase } from '../services/supabaseClient';
 import { Client, ClientStatus, AudienceType, ContentStatus, ContentType, Profile } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
@@ -25,74 +26,29 @@ import {
     Send,
     Eye,
     Pencil,
-    StickyNote
+    StickyNote,
+    Loader2
 } from 'lucide-react';
 
-// --- Mock Data ---
+// Extended Client Interface for this view
+interface ClientDetailData extends Client {
+    contentCount: number;
+    socialAccounts: { platform: string; account_name: string; connected: boolean; posting_preference: string }[];
+}
 
-const mockClients: Record<string, Client & { contentCount: number; socialAccounts: { platform: string; account_name: string; connected: boolean; posting_preference: string }[] }> = {
-    c1: {
-        id: 'c1', org_id: 'org1', name: 'Sarah Chen', contact_email: 'sarah@meridianwealth.com', contact_phone: '(555) 234-5678',
-        company: 'Meridian Wealth Partners', audience_type: AudienceType.ACCREDITED, notes: 'Prefers educational content on retirement planning. Quarterly blog posts and monthly LinkedIn updates.',
-        status: ClientStatus.ACTIVE, created_at: '2024-01-05T10:00:00Z', contentCount: 14,
-        socialAccounts: [
-            { platform: 'linkedin', account_name: 'Sarah Chen, CFP', connected: true, posting_preference: 'auto' },
-            { platform: 'facebook', account_name: 'Meridian Wealth', connected: true, posting_preference: 'manual' }
-        ]
-    },
-    c2: {
-        id: 'c2', org_id: 'org1', name: 'James Rivera', contact_email: 'jrivera@capitalgroup.com',
-        company: 'Capital Growth Advisors', audience_type: AudienceType.QUALIFIED, status: ClientStatus.ACTIVE, created_at: '2024-01-10T14:00:00Z', contentCount: 8,
-        socialAccounts: [
-            { platform: 'linkedin', account_name: 'James Rivera', connected: true, posting_preference: 'scheduled' }
-        ]
-    },
-    c3: {
-        id: 'c3', org_id: 'org1', name: 'Dr. Emily Thornton', contact_email: 'ethornton@gmail.com', contact_phone: '(555) 876-5432',
-        company: 'Thornton Family Office', audience_type: AudienceType.QUALIFIED, notes: 'High-touch client. All content must go through two rounds of compliance review. Focus on alternative investments and estate planning.',
-        status: ClientStatus.ACTIVE, created_at: '2024-02-01T09:00:00Z', contentCount: 22,
-        socialAccounts: [
-            { platform: 'linkedin', account_name: 'Dr. Emily Thornton', connected: true, posting_preference: 'auto' },
-            { platform: 'facebook', account_name: 'Thornton Family Office', connected: true, posting_preference: 'auto' }
-        ]
-    },
-    c4: {
-        id: 'c4', org_id: 'org1', name: 'Marcus Williams', contact_email: 'marcus@eliteadvisors.com',
-        company: 'Elite Financial Advisors', audience_type: AudienceType.GENERAL_PUBLIC, status: ClientStatus.ONBOARDING, created_at: '2024-02-10T16:00:00Z', contentCount: 0,
-        socialAccounts: []
-    },
-    c5: {
-        id: 'c5', org_id: 'org1', name: 'Patricia Hoffman', contact_email: 'phoffman@legacypartners.com', contact_phone: '(555) 345-6789',
-        company: 'Legacy Planning Partners', audience_type: AudienceType.ACCREDITED, notes: 'Long-term client. Focused on wealth transfer and estate planning. Prefers conservative tone.',
-        status: ClientStatus.ACTIVE, created_at: '2023-11-15T11:00:00Z', contentCount: 31,
-        socialAccounts: [
-            { platform: 'linkedin', account_name: 'Patricia Hoffman', connected: true, posting_preference: 'manual' },
-            { platform: 'facebook', account_name: 'Legacy Planning', connected: false, posting_preference: 'manual' }
-        ]
-    },
-    c6: {
-        id: 'c6', org_id: 'org1', name: 'Robert Nakamura', contact_email: 'rnakamura@sunsetwealth.com',
-        company: 'Sunset Wealth Management', audience_type: AudienceType.GENERAL_PUBLIC, status: ClientStatus.INACTIVE, created_at: '2023-09-01T08:00:00Z', contentCount: 5,
-        socialAccounts: [
-            { platform: 'linkedin', account_name: 'Robert Nakamura', connected: false, posting_preference: 'manual' }
-        ]
-    }
-};
+interface SharedContentItem {
+    id: string; // share id
+    content_id: string; // request id
+    title: string;
+    content_type: ContentType;
+    status: ContentStatus;
+    updated_at: string;
+    shared_at: string;
+}
 
-const mockContentForClient = [
-    { id: '1', title: 'Navigating Fixed Income in 2024', content_type: ContentType.BLOG, status: ContentStatus.APPROVED, updated_at: '2024-01-15T10:30:00Z' },
-    { id: '2', title: 'Retirement Planning Essentials', content_type: ContentType.LINKEDIN, status: ContentStatus.POSTED, updated_at: '2024-01-12T14:20:00Z' },
-    { id: '3', title: 'Year-End Tax Strategies', content_type: ContentType.BLOG, status: ContentStatus.IN_REVIEW, updated_at: '2024-01-10T09:15:00Z' },
-    { id: '4', title: 'Market Volatility Update', content_type: ContentType.FACEBOOK, status: ContentStatus.DRAFT, updated_at: '2024-01-08T16:45:00Z' },
-    { id: '5', title: 'Estate Planning Basics', content_type: ContentType.VIDEO_SCRIPT, status: ContentStatus.APPROVED, updated_at: '2024-01-05T11:00:00Z' },
-];
-
+// Mock Activity for now (until we have an activity log table)
 const mockActivity = [
-    { id: 'a1', action: 'Content approved', detail: '"Navigating Fixed Income in 2024" was approved by Compliance', date: '2024-01-15T10:30:00Z', icon: 'approved' },
-    { id: 'a2', action: 'Content posted', detail: '"Retirement Planning Essentials" posted to LinkedIn', date: '2024-01-12T14:20:00Z', icon: 'posted' },
-    { id: 'a3', action: 'Content submitted', detail: '"Year-End Tax Strategies" submitted for compliance review', date: '2024-01-10T09:15:00Z', icon: 'submitted' },
-    { id: 'a4', action: 'Draft created', detail: '"Market Volatility Update" draft generated with AI', date: '2024-01-08T16:45:00Z', icon: 'draft' },
-    { id: 'a5', action: 'Client onboarded', detail: 'Client profile created and LinkedIn account connected', date: '2024-01-05T10:00:00Z', icon: 'onboarded' },
+    { id: 'a1', action: 'Client Created', detail: 'Client profile added to system', date: new Date().toISOString(), icon: 'onboarded' },
 ];
 
 // --- Helpers ---
@@ -104,6 +60,7 @@ const getAudienceBadge = (type: AudienceType) => {
         case AudienceType.GENERAL_PUBLIC: return { label: 'General Public', className: 'bg-slate-100 text-slate-600 ring-slate-500/10' };
         case AudienceType.ACCREDITED: return { label: 'Accredited Investor', className: 'bg-blue-50 text-blue-700 ring-blue-600/20' };
         case AudienceType.QUALIFIED: return { label: 'Qualified Purchaser', className: 'bg-purple-50 text-purple-700 ring-purple-600/20' };
+        default: return { label: type, className: 'bg-slate-100 text-slate-600' };
     }
 };
 
@@ -112,6 +69,7 @@ const getStatusBadge = (status: ClientStatus) => {
         case ClientStatus.ACTIVE: return { label: 'Active', className: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20' };
         case ClientStatus.ONBOARDING: return { label: 'Onboarding', className: 'bg-amber-50 text-amber-700 ring-amber-600/20' };
         case ClientStatus.INACTIVE: return { label: 'Inactive', className: 'bg-slate-100 text-slate-500 ring-slate-500/10' };
+        default: return { label: status, className: 'bg-slate-100 text-slate-600' };
     }
 };
 
@@ -166,7 +124,97 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
     const navigate = useNavigate();
     const [activeTab, setActiveTab] = useState<TabKey>('overview');
 
-    const client = id ? mockClients[id] : null;
+    const [client, setClient] = useState<ClientDetailData | null>(null);
+    const [sharedContent, setSharedContent] = useState<SharedContentItem[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        if (id) fetchClientData(id);
+    }, [id]);
+
+    const fetchClientData = async (clientId: string) => {
+        setLoading(true);
+        try {
+            // 1. Fetch Client Details
+            const { data: clientData, error: clientError } = await supabase
+                .from('clients')
+                .select('*')
+                .eq('id', clientId)
+                .single();
+
+            if (clientError) throw clientError;
+
+            // 2. Fetch Shared Content
+            const { data: sharesData, error: sharesError } = await supabase
+                .from('client_content_shares')
+                .select(`
+                    id, shared_at, status,
+                    content_versions (
+                        id, created_at, content,
+                        content_requests (
+                            id, topic, status
+                        )
+                    )
+                `)
+                .eq('client_id', clientId)
+                .order('shared_at', { ascending: false });
+
+            if (sharesError) throw sharesError;
+
+            // Transform Shared Content
+            const formattedShares: SharedContentItem[] = (sharesData || []).map((share: any) => {
+                const version = share.content_versions;
+                const request = version?.content_requests;
+
+                let title = request?.topic || 'Untitled Content';
+                let type = ContentType.BLOG;
+
+                // Try to extract title/type from JSON content
+                if (version?.content) {
+                    try {
+                        const json = typeof version.content === 'string' ? JSON.parse(version.content) : version.content;
+                        if (json.title) title = json.title;
+                        if (json.type) type = json.type as ContentType;
+                    } catch (e) { }
+                }
+
+                return {
+                    id: share.id, // Share ID
+                    content_id: request?.id, // Original Request ID
+                    title: title,
+                    content_type: type,
+                    status: share.status as ContentStatus, // unread/read map to status? Or use request status?
+                    // Actually, 'unread'/'read' is the share status. 
+                    // But we might want to show the content status (e.g. Approved) or just 'Shared'.
+                    // For now, let's use the share status as a proxy or just 'Shared'
+                    updated_at: request?.updated_at || share.shared_at,
+                    shared_at: share.shared_at
+                };
+            });
+
+            setSharedContent(formattedShares);
+
+            // Set Client Data
+            setClient({
+                ...clientData,
+                contentCount: formattedShares.length,
+                socialAccounts: [] // Mock for now
+            });
+
+        } catch (error) {
+            console.error("Error fetching client details:", error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    if (loading) {
+        return (
+            <div className="flex items-center justify-center p-20">
+                <Loader2 className="animate-spin text-primary-600" size={32} />
+            </div>
+        );
+    }
 
     if (!client) {
         return (
@@ -218,7 +266,7 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                             </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-4 mt-2 text-sm text-slate-500">
-                            <span className="flex items-center gap-1.5"><Building2 size={14} />{client.company}</span>
+                            {client.company && <span className="flex items-center gap-1.5"><Building2 size={14} />{client.company}</span>}
                             <span className="flex items-center gap-1.5"><Mail size={14} />{client.contact_email}</span>
                             {client.contact_phone && <span className="flex items-center gap-1.5"><Phone size={14} />{client.contact_phone}</span>}
                         </div>
@@ -260,7 +308,7 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                         {/* Quick Stats */}
                         <div className="grid grid-cols-3 gap-4">
                             <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
-                                <p className="text-sm text-slate-500 font-medium">Total Content</p>
+                                <p className="text-sm text-slate-500 font-medium">Shared Content</p>
                                 <h3 className="text-2xl font-display font-bold text-slate-900 mt-1">{client.contentCount}</h3>
                             </div>
                             <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
@@ -269,30 +317,36 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                             </div>
                             <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
                                 <p className="text-sm text-slate-500 font-medium">Since</p>
-                                <h3 className="text-lg font-display font-bold text-slate-900 mt-1">{formatDate(client.created_at)}</h3>
+                                <h3 className="text-lg font-display font-bold text-slate-900 mt-1">{formatDate(client.created_at || new Date().toISOString())}</h3>
                             </div>
                         </div>
 
                         {/* Recent Content */}
                         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                             <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                                <h3 className="font-semibold text-slate-900 flex items-center gap-2"><FileText size={16} className="text-slate-400" />Recent Content</h3>
+                                <h3 className="font-semibold text-slate-900 flex items-center gap-2"><FileText size={16} className="text-slate-400" />Recent Shared Content</h3>
                                 <button onClick={() => setActiveTab('content')} className="text-sm font-medium text-primary-600 hover:text-primary-700">View All</button>
                             </div>
                             <div className="divide-y divide-slate-100">
-                                {mockContentForClient.slice(0, 3).map(item => (
-                                    <Link key={item.id} to={`/content/${item.id}`} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors group">
-                                        <div className="min-w-0 flex-1 pr-4">
-                                            <p className="text-sm font-semibold text-slate-900 group-hover:text-primary-600 truncate transition-colors">{item.title}</p>
-                                            <div className="flex items-center gap-2 mt-1 text-xs text-slate-500">
-                                                <span>{getContentTypeLabel(item.content_type)}</span>
-                                                <span className="text-slate-300">•</span>
-                                                <span>{formatDate(item.updated_at)}</span>
+                                {sharedContent.length === 0 ? (
+                                    <div className="p-6 text-center text-sm text-slate-400">No content shared yet.</div>
+                                ) : (
+                                    sharedContent.slice(0, 3).map(item => (
+                                        <Link key={item.id} to={`/create?Topic=${encodeURIComponent(item.title)}&existingId=${item.content_id}`} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors group">
+                                            <div className="min-w-0 flex-1 pr-4">
+                                                <p className="text-sm font-semibold text-slate-900 group-hover:text-primary-600 truncate transition-colors">{item.title}</p>
+                                                <div className="flex items-center gap-2 mt-1 text-xs text-slate-500">
+                                                    <span>{getContentTypeLabel(item.content_type)}</span>
+                                                    <span className="text-slate-300">•</span>
+                                                    <span>Shared: {formatDate(item.shared_at)}</span>
+                                                </div>
                                             </div>
-                                        </div>
-                                        <StatusBadge status={item.status} />
-                                    </Link>
-                                ))}
+                                            <div className="px-2 py-1 bg-slate-100 text-slate-600 text-xs rounded uppercase font-semibold">
+                                                {item.status}
+                                            </div>
+                                        </Link>
+                                    ))
+                                )}
                             </div>
                         </div>
                     </div>
@@ -319,28 +373,9 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                                 <h3 className="font-semibold text-slate-900 flex items-center gap-2"><Share2 size={16} className="text-slate-400" />Social Accounts</h3>
                             </div>
                             <div className="p-3">
-                                {client.socialAccounts.length > 0 ? (
-                                    client.socialAccounts.map((account, idx) => (
-                                        <div key={idx} className="flex items-center gap-3 p-3 rounded-lg hover:bg-slate-50">
-                                            <span className={account.connected ? 'text-primary-600' : 'text-slate-400'}>
-                                                {getPlatformIcon(account.platform)}
-                                            </span>
-                                            <div className="flex-1 min-w-0">
-                                                <p className="text-sm font-medium text-slate-800 truncate">{account.account_name}</p>
-                                                <p className="text-xs text-slate-500 capitalize">{account.posting_preference} posting</p>
-                                            </div>
-                                            {account.connected ? (
-                                                <Wifi size={14} className="text-emerald-500" />
-                                            ) : (
-                                                <WifiOff size={14} className="text-slate-400" />
-                                            )}
-                                        </div>
-                                    ))
-                                ) : (
-                                    <div className="p-4 text-center">
-                                        <p className="text-sm text-slate-400">No accounts connected</p>
-                                    </div>
-                                )}
+                                <div className="p-4 text-center">
+                                    <p className="text-sm text-slate-400">Social integrations coming soon.</p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -350,7 +385,7 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
             {activeTab === 'content' && (
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                     <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                        <h3 className="font-semibold text-slate-900">All Content for {client.name}</h3>
+                        <h3 className="font-semibold text-slate-900">All Content Shared with {client.name}</h3>
                         <Link
                             to={`/create?clientId=${client.id}&clientName=${encodeURIComponent(client.name)}`}
                             className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-600 hover:text-primary-700"
@@ -359,88 +394,39 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                         </Link>
                     </div>
                     <div className="divide-y divide-slate-100">
-                        {mockContentForClient.map(item => (
-                            <Link key={item.id} to={`/content/${item.id}`} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors group">
+                        {sharedContent.length > 0 ? sharedContent.map(item => (
+                            <Link key={item.id} to={`/create?Topic=${encodeURIComponent(item.title)}&existingId=${item.content_id}`} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors group">
                                 <div className="min-w-0 flex-1 pr-4">
                                     <p className="text-base font-semibold text-slate-900 group-hover:text-primary-600 truncate transition-colors">{item.title}</p>
                                     <div className="flex items-center gap-2 mt-1 text-xs text-slate-500">
                                         <span>{getContentTypeLabel(item.content_type)}</span>
                                         <span className="text-slate-300">•</span>
-                                        <span className="flex items-center gap-1"><Calendar size={12} />{formatDate(item.updated_at)}</span>
+                                        <span className="flex items-center gap-1"><Calendar size={12} />Shared: {formatDate(item.shared_at)}</span>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-3">
-                                    <StatusBadge status={item.status} />
+                                    <div className="px-2 py-1 bg-slate-100 text-slate-600 text-xs rounded uppercase font-semibold">
+                                        {item.status}
+                                    </div>
                                     <Eye size={16} className="text-slate-300 group-hover:text-primary-500 transition-colors" />
                                 </div>
                             </Link>
-                        ))}
+                        )) : (
+                            <div className="p-16 text-center">
+                                <FileText size={40} className="mx-auto text-slate-200 mb-3" />
+                                <p className="text-slate-500 font-medium">No content shared yet</p>
+                                <p className="text-sm text-slate-400">Publish content to {client.name} from the Content Editor.</p>
+                            </div>
+                        )}
                     </div>
-                    {mockContentForClient.length === 0 && (
-                        <div className="p-16 text-center">
-                            <FileText size={40} className="mx-auto text-slate-200 mb-3" />
-                            <p className="text-slate-500 font-medium">No content yet</p>
-                            <p className="text-sm text-slate-400">Create your first piece of content for {client.name}</p>
-                        </div>
-                    )}
                 </div>
             )}
 
             {activeTab === 'social' && (
-                <div className="space-y-6">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                        {['linkedin', 'facebook', 'twitter', 'instagram'].map(platform => {
-                            const account = client.socialAccounts.find(s => s.platform === platform);
-                            const isConnected = account?.connected || false;
-
-                            return (
-                                <div key={platform} className={`bg-white rounded-xl shadow-sm border overflow-hidden transition-all ${isConnected ? 'border-slate-200' : 'border-dashed border-slate-300'}`}>
-                                    <div className="p-5">
-                                        <div className="flex items-center gap-4 mb-4">
-                                            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${isConnected ? 'bg-primary-50 text-primary-600' : 'bg-slate-100 text-slate-400'}`}>
-                                                {getPlatformIcon(platform, 24)}
-                                            </div>
-                                            <div className="flex-1">
-                                                <h4 className="font-semibold text-slate-900 capitalize">{platform}</h4>
-                                                {account ? (
-                                                    <p className="text-sm text-slate-500">{account.account_name}</p>
-                                                ) : (
-                                                    <p className="text-sm text-slate-400">Not connected</p>
-                                                )}
-                                            </div>
-                                            {isConnected ? (
-                                                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-medium ring-1 ring-inset ring-emerald-600/20">
-                                                    <Wifi size={12} /> Connected
-                                                </span>
-                                            ) : (
-                                                <button className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-sm font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors">
-                                                    Connect
-                                                </button>
-                                            )}
-                                        </div>
-
-                                        {account && isConnected && (
-                                            <div className="bg-slate-50 rounded-lg p-3 flex items-center justify-between">
-                                                <div className="text-sm">
-                                                    <span className="text-slate-500">Posting mode: </span>
-                                                    <span className="font-medium text-slate-700 capitalize">{account.posting_preference}</span>
-                                                </div>
-                                                <button className="text-xs text-primary-600 hover:text-primary-700 font-medium">Change</button>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-
-                    <div className="bg-blue-50 border border-blue-100 rounded-xl p-5 flex items-start gap-3">
-                        <Share2 size={20} className="text-blue-500 flex-shrink-0 mt-0.5" />
-                        <div>
-                            <p className="text-sm font-medium text-blue-900">Blotato Integration</p>
-                            <p className="text-sm text-blue-700 mt-1">Social account connections are managed through Blotato. Connecting an account here will initiate the OAuth flow for the client to authorize posting on their behalf.</p>
-                        </div>
-                    </div>
+                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center text-slate-500">
+                    <Share2 size={48} className="mx-auto mb-4 text-slate-300" />
+                    <h3 className="text-lg font-semibold text-slate-900">Social Integrations</h3>
+                    <p className="mt-2">Connecting social accounts for auto-posting is coming in the next update.</p>
                 </div>
             )}
 
