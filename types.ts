@@ -1,7 +1,8 @@
 export enum UserRole {
   ADMIN = 'admin',
   ADVISOR = 'advisor',
-  COMPLIANCE = 'compliance'
+  COMPLIANCE = 'compliance',
+  CLIENT = 'client'
 }
 
 export enum ContentStatus {

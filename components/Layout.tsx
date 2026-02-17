@@ -11,7 +11,8 @@ import {
   Bell,
   PenTool,
   ChevronDown,
-  History as HistoryIcon
+  History as HistoryIcon,
+  Eye
 } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
 import { UserRole, Profile } from '../types';
@@ -20,9 +21,10 @@ interface LayoutProps {
   children: React.ReactNode;
   userRole: UserRole;
   profile: Profile | null;
+  setRoleOverride?: (role: UserRole | null) => void;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
+const Layout: React.FC<LayoutProps> = ({ children, userRole, profile, setRoleOverride }) => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
@@ -33,7 +35,7 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
   };
 
   const navItems = [
-    { label: 'Dashboard', path: '/', icon: <LayoutDashboard size={18} />, roles: [UserRole.ADMIN, UserRole.ADVISOR, UserRole.COMPLIANCE] },
+    { label: 'Dashboard', path: '/', icon: <LayoutDashboard size={18} />, roles: [UserRole.ADMIN, UserRole.ADVISOR, UserRole.COMPLIANCE, UserRole.CLIENT] },
     { label: 'Topics Library', path: '/topics', icon: <PenTool size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
     { label: 'Clients', path: '/clients', icon: <Users size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
     { label: 'Review Queue', path: '/compliance', icon: <ShieldCheck size={18} />, roles: [UserRole.COMPLIANCE, UserRole.ADMIN] },
@@ -79,7 +81,42 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
           })}
         </nav>
 
-        <div className="p-4 border-t border-slate-100">
+        <div className="p-4 border-t border-slate-100 bg-slate-50/50">
+          {/* Role Switcher */}
+          {setRoleOverride && (
+            <div className="mb-4">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 px-1 flex items-center gap-1">
+                <Eye size={12} /> View As
+              </p>
+              <div className="grid grid-cols-1 gap-1">
+                <button
+                  onClick={() => setRoleOverride(null)}
+                  className={`text-xs text-left px-2 py-1.5 rounded-md transition-colors ${!userRole || userRole === profile?.role ? 'bg-primary-100 text-primary-800 font-medium' : 'text-slate-500 hover:bg-slate-100'}`}
+                >
+                  Current User ({profile?.role || 'Advisor'})
+                </button>
+                <button
+                  onClick={() => setRoleOverride(UserRole.ADVISOR)}
+                  className={`text-xs text-left px-2 py-1.5 rounded-md transition-colors ${userRole === UserRole.ADVISOR && profile?.role !== UserRole.ADVISOR ? 'bg-indigo-100 text-indigo-800 font-medium' : 'text-slate-500 hover:bg-slate-100'}`}
+                >
+                  Advisor View
+                </button>
+                <button
+                  onClick={() => setRoleOverride(UserRole.COMPLIANCE)}
+                  className={`text-xs text-left px-2 py-1.5 rounded-md transition-colors ${userRole === UserRole.COMPLIANCE ? 'bg-amber-100 text-amber-800 font-medium' : 'text-slate-500 hover:bg-slate-100'}`}
+                >
+                  Compliance View
+                </button>
+                <button
+                  onClick={() => setRoleOverride(UserRole.CLIENT)}
+                  className={`text-xs text-left px-2 py-1.5 rounded-md transition-colors ${userRole === UserRole.CLIENT ? 'bg-emerald-100 text-emerald-800 font-medium' : 'text-slate-500 hover:bg-slate-100'}`}
+                >
+                  Client View
+                </button>
+              </div>
+            </div>
+          )}
+
           <button
             onClick={handleSignOut}
             className="flex items-center gap-2 px-3 py-2 w-full text-left text-sm font-medium text-slate-500 hover:text-red-600 transition-colors rounded-lg hover:bg-red-50"
@@ -141,7 +178,12 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
             <div className="flex items-center gap-3 pl-6 border-l border-slate-200">
               <div className="hidden sm:flex flex-col text-right">
                 <span className="text-sm font-semibold text-slate-900">{profile?.name || 'User'}</span>
-                <span className="text-xs text-slate-500 font-medium capitalize">{userRole}</span>
+                <span className="text-xs text-slate-500 font-medium capitalize flex items-center gap-1 justify-end">
+                  {userRole}
+                  {profile?.role && userRole !== profile.role && (
+                    <span className="bg-indigo-100 text-indigo-700 text-[10px] px-1 rounded ml-1">View</span>
+                  )}
+                </span>
               </div>
               <div className="h-9 w-9 bg-slate-200 rounded-full flex items-center justify-center text-slate-600 font-bold border-2 border-white shadow-sm ring-1 ring-slate-100">
                 {(profile?.name || 'U').split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}

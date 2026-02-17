@@ -1,10 +1,38 @@
 import { createClient } from '@supabase/supabase-js';
 
 // Access environment variables securely
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://placeholder-url.supabase.co';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'placeholder-key';
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    'Missing Supabase config. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file.',
+  );
+}
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+const extractFunctionErrorMessage = async (error: any): Promise<string> => {
+  if (!error) return 'Unknown function error';
+
+  const response = error?.context;
+  if (response) {
+    try {
+      const payload = await response.clone().json();
+      if (payload?.error) return payload.error;
+      if (payload?.message) return payload.message;
+    } catch {
+      try {
+        const text = await response.clone().text();
+        if (text) return text;
+      } catch {
+        // ignore secondary parse errors
+      }
+    }
+  }
+
+  return error.message || 'Unknown function error';
+};
 
 export const getCurrentUser = async () => {
   const { data: { user } } = await supabase.auth.getUser();
@@ -16,122 +44,43 @@ export const triggerContentGeneration = async (payload: {
   topic: string;
   contentType: string;
   instructions: string;
-  provider?: 'claude' | 'gemini';
+  provider?: 'claude' | 'kimi' | 'gemini';
   contentLength?: 'Short' | 'Medium' | 'Long';
   action?: 'generate' | 'extend' | 'rewrite';
   currentContent?: string;
   rewriteMode?: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance';
   complianceNote?: string;
 }) => {
-  // Hardcoded API Key for Kimi (NVIDIA) as requested for demo
-  const NVIDIA_API_KEY = "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";
+  const { data, error } = await supabase.functions.invoke('generate-content', {
+    body: payload,
+  });
 
-  // System Prompts & Logic (Moved from Edge Function)
-  const lengthGuides = {
-    'Short': 'Length: Concise, around 300-500 words.',
-    'Medium': 'Length: Balanced, around 600-1000 words.',
-    'Long': 'Length: Comprehensive deep-dive, around 1200+ words.'
-  };
-  const lengthInstruction = lengthGuides[payload.contentLength || 'Medium'];
-
-  const legacyWealthStyle = `
-You are a senior wealth advisor at Legacy Wealth Management (like Lincoln West or Andy Rad).
-Tone: Professional, educational, authoritative, yet accessible. NOT salesy.
-Formatting: 
-- Use clear, bold headers.
-- DO NOT use bullet points with dashes/hyphens. Use cohesive paragraphs or numbered lists if absolutely necessary.
-- Write in a flowing, human narrative.
-- No "AI-isms" (e.g., avoid "In conclusion", "Delve", "In the dynamic world of", "Tapestry").
-- Focus on wealth preservation, endowments, and alternative investments.
-`;
-
-  const posterStyle = `
-You are a creative director for a high-end financial firm.
-Task: Describe a "Poster Style" visual asset or video script.
-Style: Clean, bold font, high contrast, professional financial aesthetic.
-Output: Provide a detailed visual description or script. Do not output markdown code blocks unless it's a script.
-`;
-
-  let systemPrompt = legacyWealthStyle;
-  let userContent = `Write a ${payload.contentType} about ${payload.topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${payload.instructions}`;
-
-  if (payload.contentType && (payload.contentType.toLowerCase().includes('video') || payload.contentType.toLowerCase().includes('ad'))) {
-    systemPrompt = posterStyle;
-    userContent = `Create a visual description or video script for: ${payload.topic}. \n\nContext: ${payload.instructions}`;
+  if (error) {
+    console.error("Error invoking content generation:", error);
+    const message = await extractFunctionErrorMessage(error);
+    throw new Error(message);
   }
 
-  try {
-    // Use local proxy path to avoid CORS issues in browser
-    const response = await fetch("/api/nvidia/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${NVIDIA_API_KEY}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-      },
-      body: JSON.stringify({
-        model: "moonshotai/kimi-k2.5",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent }
-        ],
-        max_tokens: 16384,
-        temperature: 1.00,
-        top_p: 1.00,
-        stream: false
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error?.message || `API Error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    const generatedText = data.choices?.[0]?.message?.content || '';
-
-    // Parsing Logic (Client-Side)
-    const lines = generatedText.split('\n');
-    let title = lines[0]?.replace(/^#\s*/, '').replace(/\*\*/g, '').trim() || `Generated Content: ${payload.topic}`;
-    let body = lines.slice(1).join('\n').trim();
-
-    if (!title || title.length < 5) title = `Deep Dive: ${payload.topic}`;
-
-    const htmlBody = body.split('\n\n')
-      .map((block: string) => {
-        const trimmed = block.trim();
-        if (!trimmed) return '';
-        if (trimmed.startsWith('###')) return `<h3 style="margin-top: 32px; margin-bottom: 16px; font-weight: 700;">${trimmed.replace(/^###\s*/, '')}</h3>`;
-        if (trimmed.startsWith('##')) return `<h2 style="margin-top: 40px; margin-bottom: 20px; font-weight: 700;">${trimmed.replace(/^##\s*/, '')}</h2>`;
-        if (trimmed.startsWith('#')) return `<h1 style="margin-top: 48px; margin-bottom: 24px; font-weight: 800;">${trimmed.replace(/^#\s*/, '')}</h1>`;
-        const formatted = trimmed.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        return `<p style="margin-bottom: 24px;">${formatted}</p>`;
-      })
-      .join('\n');
-
-    return {
-      data: {
-        title: title,
-        body: htmlBody,
-        disclaimers: "Generated by Kimi 2.5 (Direct API). Investment advice is subject to market risk."
-      }
-    };
-
-  } catch (error) {
-    console.error("Direct API Error:", error);
-    throw error;
+  if (data && data.error) {
+    throw new Error(data.error);
   }
+
+  return data;
 };
 
 // Invoke the secure Supabase Edge Function for AI topic generation
-export const triggerTopicGeneration = async (existingTopics: string[]) => {
+export const triggerTopicGeneration = async (
+  existingTopics: string[],
+  provider: 'claude' | 'kimi' = 'claude',
+) => {
   const { data, error } = await supabase.functions.invoke('generate-topics', {
-    body: { existingTopics },
+    body: { existingTopics, provider },
   });
 
   if (error) {
     console.error("Error invoking topic generation:", error);
-    throw error;
+    const message = await extractFunctionErrorMessage(error);
+    throw new Error(message);
   }
 
   if (data && data.error) {

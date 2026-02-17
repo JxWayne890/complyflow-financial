@@ -51,10 +51,13 @@ interface TopicItem {
   audience?: string;
 }
 
+type TopicProvider = 'claude' | 'kimi';
+
 const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
+  const [topicProvider, setTopicProvider] = useState<TopicProvider>('claude');
   const [isGeneratingTopics, setIsGeneratingTopics] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [genStep, setGenStep] = useState(0);
@@ -161,7 +164,7 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
     setGenerateError(null);
     try {
       const existingTopicStrings = topics.map(t => t.topic);
-      const result = await triggerTopicGeneration(existingTopicStrings);
+      const result = await triggerTopicGeneration(existingTopicStrings, topicProvider);
 
       // Mark all steps as complete
       setGenStep(TOPIC_GEN_STEPS.length);
@@ -196,6 +199,26 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
           <p className="text-slate-500 mt-1">Select a pre-approved compliance topic to start generating content.</p>
         </div>
         <div className="flex items-center gap-3">
+          <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden bg-white shadow-sm">
+            <button
+              onClick={() => setTopicProvider('claude')}
+              className={`px-3 py-2 text-xs font-semibold transition-colors ${topicProvider === 'claude'
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-600 hover:bg-slate-50'
+                }`}
+            >
+              Claude
+            </button>
+            <button
+              onClick={() => setTopicProvider('kimi')}
+              className={`px-3 py-2 text-xs font-semibold transition-colors border-l border-slate-200 ${topicProvider === 'kimi'
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-600 hover:bg-slate-50'
+                }`}
+            >
+              Kimi K2.5
+            </button>
+          </div>
           <button
             onClick={handleGenerateTopics}
             disabled={isGeneratingTopics}
@@ -271,7 +294,9 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
             </div>
             <div>
               <h3 className="text-white font-display font-bold text-sm">AI Topic Generator</h3>
-              <p className="text-violet-200 text-xs">Generating compliance-approved topics...</p>
+              <p className="text-violet-200 text-xs">
+                Generating compliance-approved topics with {topicProvider === 'kimi' ? 'Kimi K2.5' : 'Claude'}...
+              </p>
             </div>
             <div className="ml-auto flex gap-1">
               <div className="w-1.5 h-1.5 bg-white rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />

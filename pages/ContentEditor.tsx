@@ -22,7 +22,11 @@ import {
   RefreshCw,
   Minimize2,
   Maximize2,
-  ShieldCheck
+  ShieldCheck,
+  Clipboard,
+  X,
+  Users,
+  ArrowLeft
 } from 'lucide-react';
 
 const GENERATION_STEPS = [
@@ -43,6 +47,8 @@ interface ContentEditorProps {
   userRole: UserRole;
   profile: Profile | null;
 }
+
+type TextProvider = 'claude' | 'kimi';
 
 const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [searchParams] = useSearchParams();
@@ -70,37 +76,64 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
 
-  // Mock Content State
+  // Content State
   const [content, setContent] = useState<ContentVersion | null>(null);
   const [status, setStatus] = useState<ContentStatus>(ContentStatus.DRAFT);
   const [reviews, setReviews] = useState<ComplianceReview[]>([]);
+  const [isLoadingRequest, setIsLoadingRequest] = useState(false);
 
-  // Simulate Fetching existing content if ID exists
-  useEffect(() => {
-    if (id) {
-      if (id === '1') {
-        setTopic("How rising rates impact bond portfolios");
-        setStatus(ContentStatus.IN_REVIEW);
-        setContent({
-          id: 'v1',
-          version_number: 1,
-          generated_by: 'ai',
-          title: 'Navigating Fixed Income in 2024',
-          body: '<p>Bond yields are attractive again...</p>',
-          created_at: new Date().toISOString()
-        });
-        setReviews([{
-          id: 'r1',
-          decision: 'changes_requested',
-          notes: 'Please add a disclaimer about yield curve risks.',
-          reviewer_id: 'prof2',
-          created_at: new Date().toISOString()
-        }]);
-      }
+  const loadRequestData = useCallback(async (requestIdToLoad: string) => {
+    setIsLoadingRequest(true);
+    setError(null);
+    try {
+      const { data: requestData, error: requestError } = await supabase
+        .from('content_requests')
+        .select('*')
+        .eq('id', requestIdToLoad)
+        .single();
+
+      if (requestError) throw requestError;
+
+      setTopic(requestData.topic_text || '');
+      setContentType(requestData.content_type || 'blog');
+      setInstructions(requestData.instructions || '');
+      setStatus((requestData.status as ContentStatus) || ContentStatus.DRAFT);
+      setRequestId(requestData.id);
+
+      const { data: latestVersionData, error: latestVersionError } = await supabase
+        .from('content_versions')
+        .select('*')
+        .eq('request_id', requestIdToLoad)
+        .order('version_number', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (latestVersionError) throw latestVersionError;
+      setContent(latestVersionData || null);
+
+      const { data: reviewData, error: reviewError } = await supabase
+        .from('compliance_reviews')
+        .select('id, decision, notes, reviewer_id, created_at')
+        .eq('request_id', requestIdToLoad)
+        .order('created_at', { ascending: false });
+
+      if (reviewError) throw reviewError;
+      setReviews((reviewData || []) as ComplianceReview[]);
+    } catch (e: any) {
+      console.error("Failed to load content request:", e);
+      setError(e.message || 'Failed to load content request.');
+    } finally {
+      setIsLoadingRequest(false);
     }
-  }, [id]);
+  }, []);
+
+  useEffect(() => {
+    if (!id) return;
+    void loadRequestData(id);
+  }, [id, loadRequestData]);
 
   const [generationMode, setGenerationMode] = useState<'text' | 'image' | 'both'>('text');
+  const [textProvider, setTextProvider] = useState<TextProvider>('claude');
   const [contentLength, setContentLength] = useState<'Short' | 'Medium' | 'Long'>('Medium');
   const [generationStep, setGenerationStep] = useState(0);
   const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -152,6 +185,172 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   }, [isExtending]);
 
+  const ensureRequestId = async (): Promise<string> => {
+    if (!profile?.id || !profile?.org_id) {
+      throw new Error('Missing profile or organization context. Please log in again.');
+    }
+
+    const parsedClientId = clientId && clientId !== 'null' ? clientId : null;
+
+    if (requestId) {
+      const updates: any = {
+        topic_text: topic,
+        content_type: contentType,
+        instructions,
+        client_id: parsedClientId,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (status === ContentStatus.CHANGES_REQUESTED) {
+        updates.status = ContentStatus.DRAFT;
+      }
+
+      const { error: requestUpdateError } = await supabase
+        .from('content_requests')
+        .update(updates)
+        .eq('id', requestId);
+
+      if (requestUpdateError) throw requestUpdateError;
+      if (updates.status) setStatus(updates.status);
+      return requestId;
+    }
+
+    const { data: requestData, error: requestError } = await supabase
+      .from('content_requests')
+      .insert({
+        topic_text: topic,
+        content_type: contentType,
+        instructions,
+        status: ContentStatus.DRAFT,
+        advisor_id: profile.id,
+        org_id: profile.org_id,
+        client_id: parsedClientId,
+      })
+      .select('id')
+      .single();
+
+    if (requestError) throw requestError;
+    setRequestId(requestData.id);
+    return requestData.id;
+  };
+
+  const createContentVersion = async (targetRequestId: string, payload: {
+    generated_by: 'ai' | 'human';
+    title: string;
+    body: string;
+    disclaimers?: string;
+  }) => {
+    const nextVersion = (content?.version_number || 0) + 1;
+    const { data: versionData, error: versionError } = await supabase
+      .from('content_versions')
+      .insert({
+        request_id: targetRequestId,
+        version_number: nextVersion,
+        generated_by: payload.generated_by,
+        title: payload.title,
+        body: payload.body,
+        disclaimers: payload.disclaimers || null,
+      })
+      .select('*')
+      .single();
+
+    if (versionError) throw versionError;
+
+    const { error: requestUpdateError } = await supabase
+      .from('content_requests')
+      .update({
+        current_version_id: versionData.id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', targetRequestId);
+
+    if (requestUpdateError) throw requestUpdateError;
+
+    return versionData as ContentVersion;
+  };
+
+  const saveCurrentEditorVersion = async (targetRequestId: string) => {
+    if (!content) return null;
+    const latestBodyRaw = editorRef.current?.innerHTML || content.body || '';
+    const latestBody = latestBodyRaw.replace(/class="new-content-highlight"/g, '').trim();
+    const latestTitle = (content.title || '').trim();
+    const existingBody = (content.body || '').replace(/class="new-content-highlight"/g, '').trim();
+    const existingTitle = (content.title || '').trim();
+
+    if (latestBody === existingBody && latestTitle === existingTitle) {
+      return content;
+    }
+
+    const savedVersion = await createContentVersion(targetRequestId, {
+      generated_by: 'human',
+      title: latestTitle,
+      body: latestBody,
+      disclaimers: content.disclaimers,
+    });
+
+    setContent(savedVersion);
+    return savedVersion;
+  };
+
+  const handleComplianceDecision = async (decision: 'approved' | 'changes_requested' | 'rejected') => {
+    if (!requestId || !profile?.id) {
+      setError('Missing content request or profile context.');
+      return;
+    }
+
+    const notePrompt = decision === 'approved'
+      ? 'Optional approval note:'
+      : decision === 'changes_requested'
+        ? 'Enter requested changes for the advisor:'
+        : 'Enter rejection reason:';
+
+    const noteValue = window.prompt(notePrompt) ?? '';
+    if (decision !== 'approved' && !noteValue.trim()) {
+      return;
+    }
+
+    try {
+      setError(null);
+      await saveCurrentEditorVersion(requestId);
+
+      const { data: reviewData, error: reviewError } = await supabase
+        .from('compliance_reviews')
+        .insert({
+          request_id: requestId,
+          reviewer_id: profile.id,
+          decision,
+          notes: noteValue.trim() || null,
+        })
+        .select('id, decision, notes, reviewer_id, created_at')
+        .single();
+
+      if (reviewError) throw reviewError;
+
+      const nextStatus =
+        decision === 'approved'
+          ? ContentStatus.APPROVED
+          : decision === 'changes_requested'
+            ? ContentStatus.CHANGES_REQUESTED
+            : ContentStatus.REJECTED;
+
+      const { error: requestUpdateError } = await supabase
+        .from('content_requests')
+        .update({
+          status: nextStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', requestId);
+
+      if (requestUpdateError) throw requestUpdateError;
+
+      setStatus(nextStatus);
+      setReviews(prev => [reviewData as ComplianceReview, ...prev]);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || 'Failed to record compliance decision.');
+    }
+  };
+
   const handleGenerate = async () => {
     if (!profile?.org_id) {
       alert("Missing profile or organization context. Please ensure you are logged in correctly.");
@@ -169,13 +368,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         generated_by: 'ai'
       };
 
-      // 1. Generate Text (Claude)
+      // 1. Generate Text (Claude or Kimi)
       if (generationMode === 'text' || generationMode === 'both') {
         const textResponse: any = await triggerContentGeneration({
           topic,
           contentType,
           instructions,
-          provider: 'claude',
+          provider: textProvider,
           contentLength,
         });
 
@@ -208,57 +407,16 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       // Mark all steps as complete
       setGenerationStep(GENERATION_STEPS.length);
 
-      // Brief delay so user sees the "all done" state before content appears
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      const currentRequestId = await ensureRequestId();
+      const savedVersion = await createContentVersion(currentRequestId, {
+        generated_by: 'ai',
+        title: result.title,
+        body: result.body,
+        disclaimers: result.disclaimers,
+      });
 
-      // --- SAVE TO DATABASE ---
-      let currentRequestId = requestId;
+      setContent(savedVersion);
 
-      if (!currentRequestId) {
-        // Create new content request
-        const { data: requestData, error: requestError } = await supabase
-          .from('content_requests')
-          .insert({
-            topic_text: topic,
-            content_type: contentType,
-            status: ContentStatus.DRAFT,
-            advisor_id: profile.id,
-            org_id: profile.org_id,
-            client_id: clientId
-          })
-          .select()
-          .single();
-
-        if (requestError) throw requestError;
-        currentRequestId = requestData.id;
-        setRequestId(currentRequestId);
-      }
-
-      // Insert version
-      const { data: versionData, error: versionError } = await supabase
-        .from('content_versions')
-        .insert({
-          request_id: currentRequestId,
-          version_number: 1, // Logic for incrementing can be added later
-          generated_by: 'ai',
-          title: result.title,
-          body: result.body,
-          disclaimers: result.disclaimers
-        })
-        .select()
-        .single();
-
-      if (versionError) throw versionError;
-
-      // Update current version pointer
-      await supabase
-        .from('content_requests')
-        .update({ current_version_id: versionData.id })
-        .eq('id', currentRequestId);
-
-      setContent(versionData);
-
-      // Update URL without reloading if it's a new request
       if (!id) {
         window.history.replaceState(null, '', `#/content/${currentRequestId}`);
       }
@@ -327,7 +485,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         topic,
         contentType,
         instructions,
-        provider: 'claude',
+        provider: textProvider,
         contentLength,
         action: 'extend',
         currentContent: currentBodyText
@@ -338,23 +496,32 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       await new Promise(resolve => setTimeout(resolve, 800));
 
       if (response.data) {
+        if (!requestId) {
+          throw new Error('No request selected to save extension changes.');
+        }
+
+        const savedVersion = await createContentVersion(requestId, {
+          generated_by: 'ai',
+          title: content.title,
+          body: response.data.body || content.body,
+          disclaimers: content.disclaimers,
+        });
+
         // Apply highlight animation
-        const highlightedBody = handleHighlightAnimation(previousBody, response.data.body);
+        const highlightedBody = handleHighlightAnimation(previousBody, savedVersion.body);
 
         setContent({
-          ...content,
+          ...savedVersion,
           body: highlightedBody,
-          // Keep title and other metadata
         });
 
         // Remove highlights after animation plays (4s)
         setTimeout(() => {
           setContent(prev => {
             if (!prev) return null;
-            // Naive cleanup: remove the class string
             return {
-              ...prev,
-              body: prev.body.replace(/class="new-content-highlight"/g, '')
+              ...savedVersion,
+              body: savedVersion.body,
             };
           });
         }, 4500);
@@ -367,10 +534,34 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   };
 
-  const handleStatusChange = (newStatus: ContentStatus) => {
-    setStatus(newStatus);
-    if (newStatus === ContentStatus.SUBMITTED) {
-      navigate('/my-content');
+  const handleStatusChange = async (newStatus: ContentStatus) => {
+    try {
+      setError(null);
+
+      const currentRequestId = await ensureRequestId();
+
+      if (newStatus === ContentStatus.SUBMITTED) {
+        await saveCurrentEditorVersion(currentRequestId);
+      }
+
+      const persistedStatus =
+        newStatus === ContentStatus.SUBMITTED ? ContentStatus.IN_REVIEW : newStatus;
+
+      const { error: requestUpdateError } = await supabase
+        .from('content_requests')
+        .update({
+          status: persistedStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', currentRequestId);
+
+      if (requestUpdateError) throw requestUpdateError;
+
+      setStatus(persistedStatus);
+      navigate(`/content/${currentRequestId}`);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || 'Failed to update content status.');
     }
   };
 
@@ -445,7 +636,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         topic,
         contentType,
         instructions,
-        provider: 'claude',
+        provider: textProvider,
         action: 'rewrite',
         currentContent: selectedText,
         rewriteMode: mode,
@@ -467,33 +658,24 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         selectionRange.deleteContents();
         selectionRange.insertNode(highlightSpan);
 
-        // --- SAVE TO DATABASE ---
+        if (!requestId) {
+          throw new Error('No request selected to save rewrite changes.');
+        }
+
         if (editorRef.current) {
           const newBody = editorRef.current.innerHTML;
 
-          // Insert new version
-          const { data: versionData, error: versionError } = await supabase
-            .from('content_versions')
-            .insert({
-              request_id: requestId,
-              version_number: (content.version_number || 1) + 1,
-              generated_by: 'ai',
-              title: content.title,
-              body: newBody,
-              disclaimers: content.disclaimers
-            })
-            .select()
-            .single();
+          const savedVersion = await createContentVersion(requestId, {
+            generated_by: 'ai',
+            title: content.title,
+            body: newBody.replace(/class="new-content-highlight"/g, ''),
+            disclaimers: content.disclaimers,
+          });
 
-          if (versionError) throw versionError;
-
-          // Update current version pointer
-          await supabase
-            .from('content_requests')
-            .update({ current_version_id: versionData.id })
-            .eq('id', requestId);
-
-          setContent(versionData);
+          setContent({
+            ...savedVersion,
+            body: newBody,
+          });
         }
 
         // Remove highlight after animation
@@ -504,6 +686,14 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             const textNode = document.createTextNode(highlightSpan.textContent || '');
             highlightSpan.parentNode.replaceChild(textNode, highlightSpan);
           }
+
+          setContent(prev => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              body: prev.body.replace(/class="new-content-highlight"/g, ''),
+            };
+          });
         }, 4500);
       }
     } catch (e: any) {
@@ -516,6 +706,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       setComplianceNote('');
       setSelectedText('');
       setSelectionRange(null);
+    }
+  };
+
+  const handlePublishToPortal = async () => {
+    // In a real app, this would open a modal to select clients
+    // For this demo, we'll simulate publishing to all active clients
+    // We would need the content ID to link it in the database
+    // For this UI mockup, we'll just show a success message
+    try {
+      // Simulation of API call
+      await new Promise(resolve => setTimeout(resolve, 800));
+      alert("Content published to Client Portal successfully!");
+    } catch (e) {
+      console.error("Error publishing:", e);
+      alert("Failed to publish content.");
     }
   };
 
@@ -535,26 +740,48 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             </div>
           )}
 
-          {userRole === UserRole.COMPLIANCE && status === ContentStatus.IN_REVIEW ? (
+          {userRole === UserRole.COMPLIANCE && [ContentStatus.SUBMITTED, ContentStatus.IN_REVIEW].includes(status) ? (
             <div className="flex gap-2">
-              <button className="flex items-center gap-2 bg-white border border-red-200 text-red-700 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm">
+              <button
+                onClick={() => handleComplianceDecision('changes_requested')}
+                className="flex items-center gap-2 bg-white border border-amber-200 text-amber-700 hover:bg-amber-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+              >
+                <MessageSquare size={16} /> Request Changes
+              </button>
+              <button
+                onClick={() => handleComplianceDecision('rejected')}
+                className="flex items-center gap-2 bg-white border border-red-200 text-red-700 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+              >
                 <XCircle size={16} /> Reject
               </button>
               <button
-                onClick={() => handleStatusChange(ContentStatus.APPROVED)}
+                onClick={() => handleComplianceDecision('approved')}
                 className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
               >
                 <Check size={16} /> Approve
               </button>
             </div>
-          ) : status === ContentStatus.DRAFT ? (
-            <button
-              onClick={() => handleStatusChange(ContentStatus.SUBMITTED)}
-              disabled={!content}
-              className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
-            >
-              Submit for Review <Send size={16} />
-            </button>
+          ) : (status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED) && userRole === UserRole.ADVISOR ? (
+            <div className="flex gap-2">
+              {/* Only Advisors should see Publish button */}
+              <button
+                onClick={handlePublishToPortal}
+                disabled={!content}
+                className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Users size={18} />
+                Publish to Portal
+              </button>
+              {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
+                <button
+                  onClick={() => handleStatusChange(ContentStatus.SUBMITTED)}
+                  disabled={!content}
+                  className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                >
+                  {status === ContentStatus.CHANGES_REQUESTED ? 'Resubmit for Review' : 'Submit for Review'} <Send size={16} />
+                </button>
+              )}
+            </div>
           ) : (
             <StatusBadge status={status} />
           )}
@@ -687,6 +914,32 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
               {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
                 <div className="space-y-3">
+                  {(generationMode === 'text' || generationMode === 'both') && (
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Text Engine</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          onClick={() => setTextProvider('claude')}
+                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'claude'
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                            }`}
+                        >
+                          Claude
+                        </button>
+                        <button
+                          onClick={() => setTextProvider('kimi')}
+                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'kimi'
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                            }`}
+                        >
+                          Kimi K2.5
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <button
                     onClick={handleGenerate}
                     disabled={isGenerating || isExtending}
@@ -751,7 +1004,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               </div>
 
               <h3 className="text-xl font-display font-bold text-slate-900 mb-2">Generating Your Content</h3>
-              <p className="text-sm text-slate-400 mb-10">Powered by Kimi K2.5 (NVIDIA NIM)</p>
+              <p className="text-sm text-slate-400 mb-10">
+                {generationMode === 'image'
+                  ? 'Powered by Gemini Image (Nano Banana)'
+                  : generationMode === 'both'
+                    ? `Powered by ${textProvider === 'kimi' ? 'Kimi K2.5' : 'Claude'} + Gemini Image`
+                    : `Powered by ${textProvider === 'kimi' ? 'Kimi K2.5 (NVIDIA NIM)' : 'Claude'}`}
+              </p>
 
               {/* Progress Bar */}
               {(() => {
@@ -823,6 +1082,11 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   );
                 })}
               </div>
+            </div>
+          ) : isLoadingRequest ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-slate-400 p-8">
+              <Loader2 size={30} className="animate-spin mb-3" />
+              <p className="text-sm font-medium">Loading saved content...</p>
             </div>
           ) : !content ? (
             <div className="flex-1 flex flex-col items-center justify-center text-slate-300 p-8">

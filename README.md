@@ -9,19 +9,34 @@ Create a `.env` file in the root directory:
 ```bash
 VITE_SUPABASE_URL=your_supabase_url
 VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
-VITE_N8N_WEBHOOK_URL=your_n8n_webhook_url
+```
+
+AI provider keys should be configured as Supabase Edge Function secrets (not in frontend `.env`):
+```bash
+supabase secrets set ANTHROPIC_API_KEY=your_anthropic_key
+supabase secrets set GEMINI_API_KEY=your_gemini_key
+supabase secrets set NVIDIA_API_KEY=your_nvidia_key
+supabase secrets set CLAUDE_TEXT_MODEL=claude-opus-4-5
+supabase secrets set KIMI_TEXT_MODEL=moonshotai/kimi-k2.5
+supabase secrets set GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
 ```
 
 ### 2. Supabase Setup
 1. Create a new Supabase project.
 2. Go to the SQL Editor and run the content of `migrations.sql`.
 3. Go to Auth settings and enable Email/Password login.
-4. Manually insert an Organization and a Profile (Advisor & Compliance) into the tables to start, or build a registration flow (omitted for brevity).
+4. Run `setup_auto_profile_trigger.sql` so every new signup gets an org/profile automatically.
+5. Create at least one advisor and one compliance user (or seed using `setup_database.sql`).
+6. Run `fix_workflow_rls.sql` in SQL Editor (required for content request/version insert + compliance status updates).
+7. Deploy edge functions:
+```bash
+supabase functions deploy generate-content
+supabase functions deploy generate-topics
+```
 
-### 3. n8n Setup
+### 3. n8n Setup (Optional)
 1. Import the `n8n_workflows.json` structure into your n8n instance.
-2. Configure the OpenAI credentials and Supabase credentials in n8n.
-3. Update the `VITE_N8N_WEBHOOK_URL` in your frontend `.env` to match your n8n production URL.
+2. Configure the required credentials in n8n.
 
 ### 4. Running Locally
 ```bash

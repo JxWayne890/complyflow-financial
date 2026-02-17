@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Client, ClientStatus, AudienceType, Profile } from '../types';
+import { supabase } from '../services/supabaseClient';
 import {
     Search,
     Plus,
@@ -10,84 +11,10 @@ import {
     ChevronRight,
     UserCircle,
     Linkedin,
-    Facebook
+    Facebook,
+    X,
+    Loader2
 } from 'lucide-react';
-
-// Mock data
-const mockClients: (Client & { contentCount: number; socialAccounts: string[] })[] = [
-    {
-        id: 'c1',
-        org_id: 'org1',
-        name: 'Sarah Chen',
-        contact_email: 'sarah@meridianwealth.com',
-        company: 'Meridian Wealth Partners',
-        audience_type: AudienceType.ACCREDITED,
-        status: ClientStatus.ACTIVE,
-        created_at: '2024-01-05T10:00:00Z',
-        contentCount: 14,
-        socialAccounts: ['linkedin', 'facebook']
-    },
-    {
-        id: 'c2',
-        org_id: 'org1',
-        name: 'James Rivera',
-        contact_email: 'jrivera@capitalgroup.com',
-        company: 'Capital Growth Advisors',
-        audience_type: AudienceType.QUALIFIED,
-        status: ClientStatus.ACTIVE,
-        created_at: '2024-01-10T14:00:00Z',
-        contentCount: 8,
-        socialAccounts: ['linkedin']
-    },
-    {
-        id: 'c3',
-        org_id: 'org1',
-        name: 'Dr. Emily Thornton',
-        contact_email: 'ethornton@gmail.com',
-        company: 'Thornton Family Office',
-        audience_type: AudienceType.QUALIFIED,
-        status: ClientStatus.ACTIVE,
-        created_at: '2024-02-01T09:00:00Z',
-        contentCount: 22,
-        socialAccounts: ['linkedin', 'facebook']
-    },
-    {
-        id: 'c4',
-        org_id: 'org1',
-        name: 'Marcus Williams',
-        contact_email: 'marcus@eliteadvisors.com',
-        company: 'Elite Financial Advisors',
-        audience_type: AudienceType.GENERAL_PUBLIC,
-        status: ClientStatus.ONBOARDING,
-        created_at: '2024-02-10T16:00:00Z',
-        contentCount: 0,
-        socialAccounts: []
-    },
-    {
-        id: 'c5',
-        org_id: 'org1',
-        name: 'Patricia Hoffman',
-        contact_email: 'phoffman@legacypartners.com',
-        company: 'Legacy Planning Partners',
-        audience_type: AudienceType.ACCREDITED,
-        status: ClientStatus.ACTIVE,
-        created_at: '2023-11-15T11:00:00Z',
-        contentCount: 31,
-        socialAccounts: ['linkedin', 'facebook']
-    },
-    {
-        id: 'c6',
-        org_id: 'org1',
-        name: 'Robert Nakamura',
-        contact_email: 'rnakamura@sunsetwealth.com',
-        company: 'Sunset Wealth Management',
-        audience_type: AudienceType.GENERAL_PUBLIC,
-        status: ClientStatus.INACTIVE,
-        created_at: '2023-09-01T08:00:00Z',
-        contentCount: 5,
-        socialAccounts: ['linkedin']
-    }
-];
 
 type StatusFilter = 'all' | 'active' | 'onboarding' | 'inactive';
 
@@ -99,6 +26,8 @@ const getAudienceBadge = (type: AudienceType) => {
             return { label: 'Accredited', className: 'bg-blue-50 text-blue-700 ring-blue-600/20' };
         case AudienceType.QUALIFIED:
             return { label: 'Qualified', className: 'bg-purple-50 text-purple-700 ring-purple-600/20' };
+        default:
+            return { label: type, className: 'bg-slate-100 text-slate-600 ring-slate-500/10' };
     }
 };
 
@@ -110,6 +39,8 @@ const getStatusBadge = (status: ClientStatus) => {
             return { label: 'Onboarding', className: 'bg-amber-50 text-amber-700 ring-amber-600/20' };
         case ClientStatus.INACTIVE:
             return { label: 'Inactive', className: 'bg-slate-100 text-slate-500 ring-slate-500/10' };
+        default:
+            return { label: status, className: 'bg-slate-100 text-slate-500 ring-slate-500/10' };
     }
 };
 
@@ -135,14 +66,177 @@ const getSocialIcon = (platform: string) => {
     }
 };
 
+interface AddClientModalProps {
+    isOpen: boolean;
+    onClose: () => void;
+    onSuccess: () => void;
+    orgId: string;
+}
+
+const AddClientModal: React.FC<AddClientModalProps> = ({ isOpen, onClose, onSuccess, orgId }) => {
+    const [name, setName] = useState('');
+    const [email, setEmail] = useState('');
+    const [company, setCompany] = useState('');
+    const [audienceType, setAudienceType] = useState<AudienceType>(AudienceType.GENERAL_PUBLIC);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    if (!isOpen) return null;
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true);
+        setError(null);
+
+        try {
+            console.log("Invoking invite-client with:", { email, name, company, org_id: orgId, audience_type: audienceType });
+            const { data, error } = await supabase.functions.invoke('invite-client', {
+                body: {
+                    email,
+                    name,
+                    company,
+                    org_id: orgId,
+                    audience_type: audienceType
+                }
+            });
+
+            if (error) throw error;
+            if (data?.error) throw new Error(data.error);
+
+            onSuccess();
+            onClose();
+        } catch (err: any) {
+            console.error('Error inviting client:', err);
+            setError(err.message || 'Failed to invite client');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden">
+                <div className="p-4 border-b border-slate-100 flex justify-between items-center">
+                    <h3 className="font-semibold text-slate-900">Add New Client</h3>
+                    <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
+                </div>
+                <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                    {error && (
+                        <div className="p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-100">
+                            {error}
+                        </div>
+                    )}
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Full Name</label>
+                        <input
+                            type="text"
+                            required
+                            value={name}
+                            onChange={e => setName(e.target.value)}
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                            placeholder="Jane Doe"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Email Address</label>
+                        <input
+                            type="email"
+                            required
+                            value={email}
+                            onChange={e => setEmail(e.target.value)}
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                            placeholder="jane@example.com"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Company</label>
+                        <input
+                            type="text"
+                            value={company}
+                            onChange={e => setCompany(e.target.value)}
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                            placeholder="Company Name (Optional)"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Audience Type</label>
+                        <select
+                            value={audienceType}
+                            onChange={e => setAudienceType(e.target.value as AudienceType)}
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                        >
+                            <option value={AudienceType.GENERAL_PUBLIC}>General Public</option>
+                            <option value={AudienceType.ACCREDITED}>Accredited Investor</option>
+                            <option value={AudienceType.QUALIFIED}>Qualified Purchaser</option>
+                        </select>
+                    </div>
+                    <div className="pt-2 flex justify-end gap-3">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="px-4 py-2 text-slate-600 hover:bg-slate-50 rounded-lg text-sm font-medium transition-colors"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="submit"
+                            disabled={loading}
+                            className="flex items-center gap-2 px-4 py-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors shadow-sm"
+                        >
+                            {loading && <Loader2 size={16} className="animate-spin" />}
+                            {loading ? 'Creating...' : 'Create Client'}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+};
+
 const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
+    const [clients, setClients] = useState<(Client & { contentCount: number; socialAccounts: string[] })[]>([]);
+    const [loading, setLoading] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
     const [filterStatus, setFilterStatus] = useState<StatusFilter>('all');
+    const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
+    const fetchClients = async () => {
+        if (!profile?.org_id) return;
+        setLoading(true);
+        try {
+            // Fetch clients
+            const { data: clientsData, error: clientsError } = await supabase
+                .from('clients')
+                .select('*')
+                .eq('org_id', profile.org_id)
+                .order('created_at', { ascending: false });
+
+            if (clientsError) throw clientsError;
+
+            // Transform data (mocking content count for now or fetching it)
+            // Ideally we do a join, but for now we'll just use the client data
+            const transformedClients = clientsData.map((client: any) => ({
+                ...client,
+                contentCount: 0, // Placeholder
+                socialAccounts: [] // Placeholder
+            }));
+
+            setClients(transformedClients);
+        } catch (error) {
+            console.error('Error fetching clients:', error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchClients();
+    }, [profile?.org_id]);
 
     const filteredClients = useMemo(() => {
-        return mockClients.filter(client => {
+        return clients.filter(client => {
             const matchesSearch = client.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                client.company.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                (client.company || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                 client.contact_email.toLowerCase().includes(searchQuery.toLowerCase());
 
             let matchesStatus = true;
@@ -152,14 +246,14 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
 
             return matchesSearch && matchesStatus;
         });
-    }, [searchQuery, filterStatus]);
+    }, [clients, searchQuery, filterStatus]);
 
     const statusCounts = useMemo(() => ({
-        all: mockClients.length,
-        active: mockClients.filter(c => c.status === ClientStatus.ACTIVE).length,
-        onboarding: mockClients.filter(c => c.status === ClientStatus.ONBOARDING).length,
-        inactive: mockClients.filter(c => c.status === ClientStatus.INACTIVE).length
-    }), []);
+        all: clients.length,
+        active: clients.filter(c => c.status === ClientStatus.ACTIVE).length,
+        onboarding: clients.filter(c => c.status === ClientStatus.ONBOARDING).length,
+        inactive: clients.filter(c => c.status === ClientStatus.INACTIVE).length
+    }), [clients]);
 
     const filterTabs: { key: StatusFilter; label: string; count: number }[] = [
         { key: 'all', label: 'All Clients', count: statusCounts.all },
@@ -168,8 +262,25 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
         { key: 'inactive', label: 'Inactive', count: statusCounts.inactive }
     ];
 
+    if (loading && clients.length === 0) {
+        return (
+            <div className="flex items-center justify-center h-64">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
+            </div>
+        );
+    }
+
     return (
         <div className="space-y-6">
+            <AddClientModal
+                isOpen={isAddModalOpen}
+                onClose={() => setIsAddModalOpen(false)}
+                onSuccess={() => {
+                    fetchClients();
+                }}
+                orgId={profile?.org_id || ''}
+            />
+
             {/* Header */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
@@ -178,7 +289,10 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
                         Manage your client accounts and their content
                     </p>
                 </div>
-                <button className="inline-flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors shadow-sm shadow-blue-600/20">
+                <button
+                    onClick={() => setIsAddModalOpen(true)}
+                    className="inline-flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors shadow-sm shadow-blue-600/20"
+                >
                     <Plus size={18} />
                     Add Client
                 </button>
@@ -229,6 +343,14 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
                     <p className="text-slate-500 text-sm mb-6">
                         {searchQuery ? 'Try adjusting your search or filters' : 'Add your first client to get started'}
                     </p>
+                    {!searchQuery && (
+                        <button
+                            onClick={() => setIsAddModalOpen(true)}
+                            className="inline-flex items-center gap-2 text-primary-600 font-medium hover:text-primary-700"
+                        >
+                            <Plus size={18} /> Add Client
+                        </button>
+                    )}
                 </div>
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -256,7 +378,7 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
                                             </h3>
                                             <div className="flex items-center gap-1.5 text-sm text-slate-500 mt-0.5">
                                                 <Building2 size={13} className="flex-shrink-0" />
-                                                <span className="truncate">{client.company}</span>
+                                                <span className="truncate">{client.company || 'Individual'}</span>
                                             </div>
                                         </div>
 
@@ -279,7 +401,7 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
                                     <div className="flex items-center gap-4 text-xs text-slate-500">
                                         <span className="flex items-center gap-1">
                                             <Mail size={12} />
-                                            {client.contact_email.split('@')[0]}@...
+                                            {client.contact_email}
                                         </span>
                                     </div>
                                     <div className="flex items-center gap-3">

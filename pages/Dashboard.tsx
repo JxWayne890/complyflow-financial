@@ -153,6 +153,71 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
             </div>
           </div>
         )}
+
+        {/* Client View: My Feed */}
+        {userRole === UserRole.CLIENT && (
+          <div className="lg:col-span-2 space-y-6">
+            <div className="bg-indigo-900 rounded-xl p-8 text-white relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-32 bg-indigo-500/10 rounded-full blur-3xl transform translate-x-1/2 -translate-y-1/2"></div>
+              <div className="relative z-10">
+                <h2 className="text-3xl font-display font-bold mb-2">Welcome Back, Sarah</h2>
+                <p className="text-indigo-200 max-w-xl">
+                  Here are the latest insights and updates curated specifically for your portfolio and financial goals.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md transition-shadow">
+                <div className="h-48 bg-slate-100 relative">
+                  <div className="absolute inset-0 flex items-center justify-center text-slate-400 bg-slate-200">
+                    <BarChart3 size={48} opacity={0.5} />
+                  </div>
+                  <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-semibold text-slate-700">
+                    Market Update
+                  </div>
+                </div>
+                <div className="p-6">
+                  <div className="flex items-center gap-2 text-xs text-slate-500 mb-3">
+                    <Clock size={14} />
+                    <span>Oct 24, 2023</span>
+                  </div>
+                  <h3 className="text-xl font-bold text-slate-900 mb-3">Q4 Market Outlook: Navigating Volatility</h3>
+                  <p className="text-slate-600 text-sm line-clamp-3 mb-4">
+                    As we head into the final quarter of 2023, bond yields are offering attractive opportunities for income-focused investors...
+                  </p>
+                  <button className="text-primary-600 font-medium text-sm hover:text-primary-700 flex items-center gap-1">
+                    Read Full Update <ArrowRight size={16} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md transition-shadow">
+                <div className="h-48 bg-slate-100 relative">
+                  <div className="absolute inset-0 flex items-center justify-center text-slate-400 bg-slate-200">
+                    <ShieldCheck size={48} opacity={0.5} />
+                  </div>
+                  <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-semibold text-slate-700">
+                    Planning
+                  </div>
+                </div>
+                <div className="p-6">
+                  <div className="flex items-center gap-2 text-xs text-slate-500 mb-3">
+                    <Clock size={14} />
+                    <span>Oct 22, 2023</span>
+                  </div>
+                  <h3 className="text-xl font-bold text-slate-900 mb-3">Year-End Tax Harvesting Strategies</h3>
+                  <p className="text-slate-600 text-sm line-clamp-3 mb-4">
+                    It's time to review your portfolio for tax-loss harvesting opportunities to offset gains and optimize your tax liability...
+                  </p>
+                  <button className="text-primary-600 font-medium text-sm hover:text-primary-700 flex items-center gap-1">
+                    Read Full Update <ArrowRight size={16} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,17 +1,91 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { corsHeaders } from "../_shared/cors.ts"
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { corsHeaders } from "../_shared/cors.ts";
+
+type TopicProvider = "claude" | "kimi";
+
+async function generateWithClaude(
+  apiKey: string,
+  model: string,
+  systemPrompt: string,
+  userMessage: string,
+) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 2048,
+      temperature: 0.6,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+    }),
+  });
+
+  const data = await response.json();
+  if (!response.ok || data?.error) {
+    throw new Error(data?.error?.message || `Claude API error: ${response.statusText}`);
+  }
+
+  return (data.content || [])
+    .filter((part: any) => part?.type === "text")
+    .map((part: any) => part.text || "")
+    .join("\n")
+    .trim();
+}
+
+async function generateWithKimi(
+  apiKey: string,
+  model: string,
+  systemPrompt: string,
+  userMessage: string,
+) {
+  const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      max_tokens: 4096,
+      temperature: 0.9,
+      top_p: 0.95,
+      stream: false,
+    }),
+  });
+
+  const data = await response.json();
+  if (!response.ok || data?.error) {
+    throw new Error(data?.error?.message || `Kimi API error: ${response.statusText}`);
+  }
+
+  const text = data?.choices?.[0]?.message?.content?.trim();
+  if (!text) {
+    throw new Error("Kimi API returned empty content.");
+  }
+
+  return text;
+}
 
 serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return new Response('ok', { headers: corsHeaders })
-    }
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
 
-    try {
-        const { existingTopics = [] } = await req.json()
+  try {
+    const { existingTopics = [], provider = "claude" }: { existingTopics?: string[]; provider?: TopicProvider } = await req.json();
+    const safeProvider: TopicProvider = provider === "kimi" ? "kimi" : "claude";
 
-        const NVIDIA_API_KEY = "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";
-
-        const systemPrompt = `You are the Chief Compliance Officer (CCO) and Content Strategist for a Registered Investment Advisor (RIA) called Legacy Wealth Management.
+    const systemPrompt = `You are the Chief Compliance Officer (CCO) and Content Strategist for a Registered Investment Advisor (RIA) called Legacy Wealth Management.
 
 Your task is to generate NEW blog/LinkedIn topic ideas that are fully compliant with SEC marketing rules and the firm's internal compliance guidelines.
 
@@ -63,70 +137,56 @@ INSTRUCTIONS:
 Example output format:
 [{"category":"Tax Strategy","topic":"Year-End Charitable Giving Strategies That May Reduce Your Tax Burden","audience":"General Public"},{"category":"Alternative Investments","topic":"Understanding Private Credit: A Primer for Accredited Investors","audience":"Accredited Investors"}]`;
 
-        const userMessage = `Here are the existing topics (do NOT duplicate any of these):
-${existingTopics.map((t: string) => `- ${t}`).join('\n')}
+    const userMessage = `Here are the existing topics (do NOT duplicate any of these):
+${existingTopics.map((t: string) => `- ${t}`).join("\n")}
 
 Now generate 6 brand new, compliant topic ideas as a JSON array.`;
 
-        const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${NVIDIA_API_KEY}`,
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            },
-            body: JSON.stringify({
-                model: "moonshotai/kimi-k2.5",
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: userMessage }
-                ],
-                max_tokens: 4096,
-                temperature: 0.9,
-                top_p: 0.95,
-                stream: false
-            })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok || data.error) {
-            console.error('NVIDIA API Error:', data);
-            return new Response(
-                JSON.stringify({ error: `NVIDIA Provider Error: ${data.error?.message || response.statusText}` }),
-                { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-            );
-        }
-
-        const rawContent = data.choices?.[0]?.message?.content || '[]';
-
-        // Extract JSON array from the response (handle potential markdown wrapping)
-        let jsonStr = rawContent.trim();
-        // Strip markdown code fence if present
-        if (jsonStr.startsWith('```')) {
-            jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-        }
-
-        let topics = [];
-        try {
-            topics = JSON.parse(jsonStr);
-        } catch (parseErr) {
-            console.error('Failed to parse topics JSON:', jsonStr);
-            return new Response(
-                JSON.stringify({ error: 'AI returned malformed topic data. Please try again.' }),
-                { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-            );
-        }
-
-        return new Response(
-            JSON.stringify({ topics }),
-            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-
-    } catch (error) {
-        return new Response(
-            JSON.stringify({ error: error.message || 'Internal Edge Function Error' }),
-            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
+    let rawContent = "";
+    if (safeProvider === "kimi") {
+      const nvidiaApiKey = Deno.env.get("NVIDIA_API_KEY");
+      const kimiModel = Deno.env.get("KIMI_TEXT_MODEL") || "moonshotai/kimi-k2.5";
+      if (!nvidiaApiKey) {
+        throw new Error("Missing NVIDIA_API_KEY secret.");
+      }
+      rawContent = await generateWithKimi(nvidiaApiKey, kimiModel, systemPrompt, userMessage);
+    } else {
+      const anthropicApiKey = Deno.env.get("ANTHROPIC_API_KEY");
+      const claudeModel = Deno.env.get("CLAUDE_TEXT_MODEL") || "claude-opus-4-5";
+      if (!anthropicApiKey) {
+        throw new Error("Missing ANTHROPIC_API_KEY secret.");
+      }
+      rawContent = await generateWithClaude(
+        anthropicApiKey,
+        claudeModel,
+        systemPrompt,
+        userMessage,
+      );
     }
-})
+
+    let jsonStr = rawContent.trim();
+    if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    }
+
+    let topics = [];
+    try {
+      topics = JSON.parse(jsonStr);
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "AI returned malformed topic data. Please try again." }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    return new Response(
+      JSON.stringify({ topics }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ error: error.message || "Internal Edge Function Error" }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+});
