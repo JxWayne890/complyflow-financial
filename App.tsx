@@ -68,38 +68,71 @@ const App: React.FC = () => {
 
   const userRole = roleOverride || profile?.role || UserRole.ADVISOR;
 
+  // Demo Profile Fallback
+  const effectiveProfile: Profile = profile || {
+    id: 'demo-user',
+    name: 'Demo User',
+    email: 'demo@example.com',
+    role: UserRole.ADVISOR,
+    org_id: 'demo-org'
+  };
+
   return (
     <HashRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
 
-        {/* Demo Mode: Allow access without session */}
-        <Route path="*" element={
-          <Layout
-            userRole={userRole}
-            profile={profile || {
-              id: 'demo-user',
-              name: 'Demo User',
-              email: 'demo@example.com',
-              role: UserRole.ADVISOR,
-              org_id: 'demo-org'
-            }}
-            setRoleOverride={setRoleOverride}
-          >
-            <Routes>
-              <Route path="/" element={<Dashboard userRole={userRole} profile={profile} />} />
-              <Route path="/topics" element={<TopicSelector profile={profile} />} />
-              <Route path="/create" element={<ContentEditor userRole={userRole} profile={profile} />} />
-              <Route path="/content/:id" element={<ContentEditor userRole={userRole} profile={profile} />} />
-              <Route path="/clients" element={<ClientsList profile={profile} />} />
-              <Route path="/clients/:id" element={<ClientDetail profile={profile} />} />
-              <Route path="/compliance" element={<Dashboard userRole={userRole} profile={profile} />} />
-              <Route path="/changelog" element={<Changelog />} />
-              <Route path="*" element={<Navigate to="/" />} />
-            </Routes>
+        {/* Protected Routes (with Demo Fallback) */}
+        <Route path="/" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <Dashboard userRole={userRole} profile={effectiveProfile} />
           </Layout>
         } />
+
+        <Route path="/topics" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <TopicSelector profile={effectiveProfile} />
+          </Layout>
+        } />
+
+        <Route path="/create" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <ContentEditor userRole={userRole} profile={effectiveProfile} />
+          </Layout>
+        } />
+
+        <Route path="/content/:id" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <ContentEditor userRole={userRole} profile={effectiveProfile} />
+          </Layout>
+        } />
+
+        <Route path="/clients" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <ClientsList profile={effectiveProfile} />
+          </Layout>
+        } />
+
+        <Route path="/clients/:id" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <ClientDetail profile={effectiveProfile} />
+          </Layout>
+        } />
+
+        <Route path="/compliance" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <Dashboard userRole={userRole} profile={effectiveProfile} />
+          </Layout>
+        } />
+
+        <Route path="/changelog" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <Changelog />
+          </Layout>
+        } />
+
+        <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </HashRouter>
   );
