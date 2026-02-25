@@ -340,14 +340,7 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
     }
 
     let systemPrompt = legacyWealthStyle;
-    let userContent = `Write a ${contentType} about ${topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}
-
-If the topic involves data, trends, asset allocation, or comparisons, you MUST include a data visualization. Use the QuickChart open-source API to render a chart image. Insert it directly into the HTML using this format:
-<figure style="margin:24px 0;">
-  <img src="https://quickchart.io/chart?c={type:'bar',data:{labels:['Jan','Feb'],datasets:[{label:'Data',data:[10,20]}]}}" alt="Chart description" style="max-width:100%;height:auto;border-radius:12px;display:block;" />
-  <figcaption style="font-size:14px;color:#64748b;margin-top:8px;text-align:center;">Chart description</figcaption>
-</figure>
-CRITICAL: Ensure the JSON payload inside the URL is properly escaped. You MUST URL-encode any hex color codes (e.g., change #3b82f6 to %233b82f6), otherwise the URL will break. You may use bar, line, pie, or doughnut charts as appropriate.`;
+    let userContent = `Write a ${contentType} about ${topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}`;
 
     if (
       contentType &&
