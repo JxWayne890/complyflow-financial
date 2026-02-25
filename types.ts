@@ -83,6 +83,7 @@ export interface ContentRequest {
   content_type: ContentType;
   status: ContentStatus;
   updated_at: string;
+  generation_mode?: string;
   advisor_id: string;
   title?: string; // Derived from current version
 }

@@ -150,9 +150,9 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                 .select(`
                     id, shared_at, status,
                     content_versions (
-                        id, created_at, content,
+                        id, created_at, title, body,
                         content_requests (
-                            id, topic, status
+                            id, topic, status, content_type
                         )
                     )
                 `)
@@ -166,17 +166,8 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                 const version = share.content_versions;
                 const request = version?.content_requests;
 
-                let title = request?.topic || 'Untitled Content';
-                let type = ContentType.BLOG;
-
-                // Try to extract title/type from JSON content
-                if (version?.content) {
-                    try {
-                        const json = typeof version.content === 'string' ? JSON.parse(version.content) : version.content;
-                        if (json.title) title = json.title;
-                        if (json.type) type = json.type as ContentType;
-                    } catch (e) { }
-                }
+                let title = version?.title || request?.topic || 'Untitled Content';
+                let type = request?.content_type || ContentType.BLOG;
 
                 return {
                     id: share.id, // Share ID
@@ -395,7 +386,7 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                     </div>
                     <div className="divide-y divide-slate-100">
                         {sharedContent.length > 0 ? sharedContent.map(item => (
-                            <Link key={item.id} to={`/create?Topic=${encodeURIComponent(item.title)}&existingId=${item.content_id}`} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors group">
+                            <Link key={item.id} to={`/content/${item.content_id}`} className="flex items-center justify-between p-4 hover:bg-slate-50 transition-colors group">
                                 <div className="min-w-0 flex-1 pr-4">
                                     <p className="text-base font-semibold text-slate-900 group-hover:text-primary-600 truncate transition-colors">{item.title}</p>
                                     <div className="flex items-center gap-2 mt-1 text-xs text-slate-500">

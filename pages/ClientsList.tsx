@@ -81,6 +81,18 @@ const AddClientModal: React.FC<AddClientModalProps> = ({ isOpen, onClose, onSucc
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
+    // Reset form when modal opens
+    useEffect(() => {
+        if (isOpen) {
+            setName('');
+            setEmail('');
+            setCompany('');
+            setAudienceType(AudienceType.GENERAL_PUBLIC);
+            setError(null);
+            setLoading(false);
+        }
+    }, [isOpen]);
+
     if (!isOpen) return null;
 
     const handleSubmit = async (e: React.FormEvent) => {

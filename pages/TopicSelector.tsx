@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, ChevronRight, TrendingUp, DollarSign, Heart, Briefcase, Zap, Shield, Landmark, Building2, Flame, Leaf, Atom, PiggyBank, Users, BookOpen, Scale, Sparkles, Loader2, CheckCircle2, Brain, ShieldCheck, Lightbulb, ListChecks, FileCheck } from 'lucide-react';
+import { supabase } from '../services/supabaseClient';
 import { triggerTopicGeneration } from '../services/supabaseClient';
 import { Profile } from '../types';
 
@@ -62,6 +63,7 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [genStep, setGenStep] = useState(0);
   const genStepTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [loadingTopics, setLoadingTopics] = useState(true);
 
   // Cycle through generation steps while generating topics
   useEffect(() => {
@@ -85,16 +87,13 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
     }
   }, [isGeneratingTopics]);
 
-  // Pre-approved compliance topics
-  const [topics, setTopics] = useState<TopicItem[]>([
-    // --- Original Topics ---
+  // Hardcoded fallback topics (used only when DB has no topics)
+  const FALLBACK_TOPICS: TopicItem[] = [
     { id: '1', category: 'Market Updates', topic: 'How rising rates impact bond portfolios', icon: TrendingUp },
     { id: '2', category: 'Personal Finance', topic: 'The 4% rule in a high-yield environment', icon: DollarSign },
     { id: '3', category: 'Lifestyle', topic: 'Balancing wealth and health after 50', icon: Heart },
     { id: '4', category: 'Market Updates', topic: 'AI regulation and what it means for investors', icon: TrendingUp },
     { id: '5', category: 'Estate Planning', topic: 'Revocable vs Irrevocable trusts explained', icon: Briefcase },
-
-    // --- Blog Topics ---
     { id: '6', category: 'Tax Strategy', topic: 'Investments as Tax Deductions', icon: DollarSign },
     { id: '7', category: 'Market Updates', topic: 'Creating wealth that lasts in volatile markets', icon: TrendingUp },
     { id: '8', category: 'Financial Planning', topic: 'Charitable Giving in Financial Planning', icon: Heart },
@@ -110,38 +109,46 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
     { id: '18', category: 'About Legacy', topic: 'Why Legacy?', icon: Landmark },
     { id: '19', category: 'Financial Planning', topic: 'The benefits of charitable giving in the financial sector', icon: Heart },
     { id: '20', category: 'Personal Finance', topic: 'Small business owner financial check-up', icon: BookOpen },
-    { id: '21', category: 'Personal Finance', topic: 'Where is the best place to start in investing and financial planning?', icon: PiggyBank },
-    { id: '22', category: 'Tax Strategy', topic: 'Setting up a proactive tax strategy', icon: DollarSign },
-    { id: '23', category: 'Market Updates', topic: 'What is downside protection and how does it help to reduce losses?', icon: Shield },
-    { id: '24', category: 'Personal Finance', topic: 'Where to find the right financial advice for you', icon: Users },
-    { id: '25', category: 'Alternative Investments', topic: 'Different types of structured notes', icon: Zap },
-    { id: '26', category: 'Estate Planning', topic: 'Protecting your future for the ones that matter most', icon: Briefcase },
-    { id: '27', category: 'Market Updates', topic: 'Making a personalized stock market plan (active vs passive management, fees, plans)', icon: TrendingUp },
-    { id: '28', category: 'Personal Finance', topic: 'Building the right financial team', icon: Users },
-    { id: '29', category: 'Alternative Investments', topic: 'What is a private equity investment and why is it a good way to diversify your portfolio?', icon: Zap },
-    { id: '30', category: 'Tax Strategy', topic: 'Decreasing your tax burden in one year', icon: DollarSign },
-    { id: '31', category: 'Alternative Investments', topic: 'Institutionalization of Single Family Homes', icon: Building2 },
-    { id: '32', category: 'About Legacy', topic: 'What to expect when you become a client of LWM - new client experience', icon: Landmark },
-    { id: '33', category: 'Alternative Investments', topic: 'How to create a more-defined outcome through structured notes', icon: Zap },
-    { id: '34', category: 'Market Updates', topic: 'Why should you be thinking outside the market when you make your financial plan?', icon: TrendingUp },
-    { id: '35', category: 'Personal Finance', topic: 'Best savings strategies for retirement planning', icon: PiggyBank },
-    { id: '36', category: 'Financial Planning', topic: 'Premium Finance', icon: DollarSign },
-    { id: '37', category: 'Personal Finance', topic: 'Small business retirement plans', icon: PiggyBank },
+  ];
 
-    // --- Advisors (Alternative Investing Focused) ---
-    { id: '38', category: 'Alternative Investments', topic: 'What Are Alternatives? A Simple Guide for High-Net-Worth Investors', icon: Zap },
-    { id: '39', category: 'Alternative Investments', topic: "Why Alternatives Belong in Every Serious Investor's Portfolio", icon: Zap },
-    { id: '40', category: 'Alternative Investments', topic: 'The Endowment Model Explained: How Yale Changed Investing Forever', icon: Landmark },
-    { id: '41', category: 'Alternative Investments', topic: "Alternatives vs. Traditional Portfolios: What's the Real Difference?", icon: Scale },
-    { id: '42', category: 'Alternative Investments', topic: 'How Much Should You Allocate to Alternatives?', icon: Zap },
+  const [topics, setTopics] = useState<TopicItem[]>([]);
 
-    // --- Energy Investments ---
-    { id: '43', category: 'Energy Investments', topic: "The Future of Energy: Why It's More Than Just Oil and Gas", icon: Flame },
-    { id: '44', category: 'Energy Investments', topic: 'Investing in Oil & Gas: Risks, Rewards, and Tax Benefits', icon: Flame },
-    { id: '45', category: 'Energy Investments', topic: 'Renewable Energy: Solar, Wind, and the Investment Opportunity Ahead', icon: Leaf },
-    { id: '46', category: 'Energy Investments', topic: 'The Rise of Nuclear: Safe, Scalable, and Investable?', icon: Atom },
-    { id: '47', category: 'Energy Investments', topic: 'Energy Infrastructure Funds: Pipelines, Storage, and Beyond', icon: Building2 },
-  ]);
+  // Fetch topics from Supabase on mount
+  useEffect(() => {
+    const fetchTopics = async () => {
+      setLoadingTopics(true);
+      try {
+        const { data, error } = await supabase
+          .from('topics')
+          .select('id, category, topic, source, active')
+          .eq('active', true)
+          .order('created_at', { ascending: true });
+
+        if (error) throw error;
+
+        if (data && data.length > 0) {
+          const dbTopics: TopicItem[] = data.map((t: any) => ({
+            id: t.id,
+            category: t.category || 'Personal Finance',
+            topic: t.topic,
+            icon: CATEGORY_ICONS[t.category] || DollarSign,
+            aiGenerated: t.source === 'ai',
+          }));
+          setTopics(dbTopics);
+        } else {
+          // Fallback to hardcoded topics if DB has none
+          setTopics(FALLBACK_TOPICS);
+        }
+      } catch (err) {
+        console.error('Error fetching topics:', err);
+        setTopics(FALLBACK_TOPICS);
+      } finally {
+        setLoadingTopics(false);
+      }
+    };
+
+    fetchTopics();
+  }, [profile?.org_id]);
 
   // Derive unique categories with counts
   const categoryList = ['All', ...Array.from(new Set(topics.map(t => t.category)))];
@@ -171,15 +178,38 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
       await new Promise(resolve => setTimeout(resolve, 800));
 
       if (result.topics && Array.isArray(result.topics)) {
-        const nextId = topics.length + 1;
-        const newTopics: TopicItem[] = result.topics.map((t: any, i: number) => ({
-          id: String(nextId + i),
-          category: t.category || 'Personal Finance',
-          topic: t.topic,
-          icon: CATEGORY_ICONS[t.category] || DollarSign,
-          aiGenerated: true,
-          audience: t.audience,
-        }));
+        // Save AI-generated topics to Supabase
+        const newTopics: TopicItem[] = [];
+        for (const t of result.topics) {
+          const insertPayload: any = {
+            topic: t.topic,
+            category: t.category || 'Personal Finance',
+            source: 'ai',
+            active: true,
+          };
+          // Only set org_id if we have a real one
+          if (profile?.org_id && profile.org_id !== '00000000-0000-0000-0000-000000000000') {
+            insertPayload.org_id = profile.org_id;
+          }
+
+          const { data: inserted, error: insertErr } = await supabase
+            .from('topics')
+            .insert(insertPayload)
+            .select('id')
+            .single();
+
+          const topicId = inserted?.id || String(Date.now() + Math.random());
+          if (insertErr) console.warn('Failed to save topic to DB:', insertErr.message);
+
+          newTopics.push({
+            id: topicId,
+            category: t.category || 'Personal Finance',
+            topic: t.topic,
+            icon: CATEGORY_ICONS[t.category] || DollarSign,
+            aiGenerated: true,
+            audience: t.audience,
+          });
+        }
         setTopics(prev => [...prev, ...newTopics]);
       }
     } catch (err: any) {

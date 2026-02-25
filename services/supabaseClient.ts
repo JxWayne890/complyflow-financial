@@ -44,12 +44,13 @@ export const triggerContentGeneration = async (payload: {
   topic: string;
   contentType: string;
   instructions: string;
-  provider?: 'claude' | 'kimi' | 'gemini';
+  provider?: 'claude' | 'kimi' | 'gemini' | 'chatgpt';
   contentLength?: 'Short' | 'Medium' | 'Long';
   action?: 'generate' | 'extend' | 'rewrite';
   currentContent?: string;
   rewriteMode?: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance';
   complianceNote?: string;
+  count?: number;
 }) => {
   const { data, error } = await supabase.functions.invoke('generate-content', {
     body: payload,

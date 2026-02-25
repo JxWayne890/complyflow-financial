@@ -31,7 +31,14 @@ interface ContentItem {
   status: ContentStatus;
   updated_at: string;
   excerpt: string;
+  mode: string;
 }
+
+const getGenerationModeLabel = (mode: string | null, title: string) => {
+  if (mode === 'image' || title.toLowerCase().startsWith('visual asset:')) return 'Visual';
+  if (mode === 'both') return 'Full Article';
+  return 'Written';
+};
 
 const getContentTypeIcon = (type: ContentType) => {
   switch (type) {
@@ -98,9 +105,9 @@ const MyLibrary: React.FC = () => {
       const { data, error } = await supabase
         .from('content_requests')
         .select(`
-                id, topic, status, updated_at, created_at,
+                id, topic, status, updated_at, created_at, content_type,
                 content_versions (
-                    id, version_number, content, created_at
+                    id, version_number, title, body, created_at
                 )
             `)
         .order('updated_at', { ascending: false });
@@ -117,25 +124,11 @@ const MyLibrary: React.FC = () => {
 
           let title = item.topic; // Default title is topic
           let excerpt = '';
-          let type = ContentType.BLOG; // Default type logic needs refinement
+          let type = (item.content_type as ContentType) || ContentType.BLOG;
 
-          if (latestVersion && latestVersion.content) {
-            try {
-              const contentJson = typeof latestVersion.content === 'string'
-                ? JSON.parse(latestVersion.content)
-                : latestVersion.content;
-
-              title = contentJson.title || title;
-              excerpt = contentJson.content?.substring(0, 150) + '...' || '';
-
-              // Infer type from content structure or metadata if available
-              // For now we default to BLOG unless we store it in content_requests
-              // We really should store 'type' in content_requests.
-              // Assuming the generated content might have a type field or we guess.
-              if (contentJson.type) type = contentJson.type as ContentType;
-            } catch (e) {
-              console.error("Error parsing content JSON", e);
-            }
+          if (latestVersion) {
+            if (latestVersion.title) title = latestVersion.title;
+            if (latestVersion.body) excerpt = latestVersion.body.substring(0, 150) + '...';
           }
 
           return {
@@ -145,7 +138,8 @@ const MyLibrary: React.FC = () => {
             content_type: type,
             status: item.status as ContentStatus,
             updated_at: item.updated_at || item.created_at,
-            excerpt: excerpt
+            excerpt: excerpt,
+            mode: getGenerationModeLabel(null, title)
           };
         });
         setContent(formattedContent);
@@ -257,8 +251,8 @@ const MyLibrary: React.FC = () => {
               key={tab.key}
               onClick={() => setFilterStatus(tab.key)}
               className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${filterStatus === tab.key
-                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                  : 'text-slate-600 hover:bg-slate-50 border border-transparent'
+                ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                : 'text-slate-600 hover:bg-slate-50 border border-transparent'
                 }`}
             >
               {tab.label}
@@ -316,7 +310,7 @@ const MyLibrary: React.FC = () => {
                     {activeDropdown === item.id && (
                       <div className="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-lg border border-slate-200 py-1 z-10 min-w-[140px]">
                         <Link
-                          to={`/create?Topic=${encodeURIComponent(item.topic_text)}&existingId=${item.id}`}
+                          to={`/content/${item.id}`}
                           className="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
                         >
                           <Eye size={14} /> Open
@@ -332,11 +326,19 @@ const MyLibrary: React.FC = () => {
                   </div>
                 </div>
 
-                <Link to={`/create?Topic=${encodeURIComponent(item.topic_text)}&existingId=${item.id}`}>
-                  <h3 className="text-lg font-semibold text-slate-900 mb-2 group-hover:text-primary-600 transition-colors line-clamp-2">
+                <Link to={`/content/${item.id}`}>
+                  <h3 className="text-lg font-semibold text-slate-900 mb-1 group-hover:text-primary-600 transition-colors line-clamp-2">
                     {item.title}
                   </h3>
                 </Link>
+                <div className="mb-3">
+                  <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${item.mode === 'Visual' ? 'bg-purple-50 text-purple-600 border border-purple-100' :
+                    item.mode === 'Full Article' ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' :
+                      'bg-slate-50 text-slate-600 border border-slate-100'
+                    }`}>
+                    {item.mode}
+                  </span>
+                </div>
 
                 <p className="text-sm text-slate-500 line-clamp-2 mb-4">
                   {item.excerpt || item.topic_text}
@@ -344,7 +346,7 @@ const MyLibrary: React.FC = () => {
               </div>
 
               {/* Card Footer */}
-              <div className="px-5 py-3 bg-slate-50/50 border-t border-slate-100 flex items-center justify-between">
+              < div className="px-5 py-3 bg-slate-50/50 border-t border-slate-100 flex items-center justify-between" >
                 <div className="flex items-center gap-1.5 text-xs text-slate-400">
                   <Calendar size={12} />
                   {formatDate(item.updated_at)}
@@ -352,8 +354,9 @@ const MyLibrary: React.FC = () => {
                 <StatusBadge status={item.status} />
               </div>
             </div>
-          ))}
-        </div>
+          ))
+          }
+        </div >
       ) : (
         /* List View */
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -372,11 +375,17 @@ const MyLibrary: React.FC = () => {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <Link
-                      to={`/create?Topic=${encodeURIComponent(item.topic_text)}&existingId=${item.id}`}
+                      to={`/content/${item.id}`}
                       className="text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate"
                     >
                       {item.title}
                     </Link>
+                    <span className={`ml-3 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${item.mode === 'Visual' ? 'bg-purple-50 text-purple-600 border border-purple-100' :
+                      item.mode === 'Full Article' ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' :
+                        'bg-slate-50 text-slate-600 border border-slate-100'
+                      }`}>
+                      {item.mode}
+                    </span>
                   </div>
                   <div className="flex items-center gap-3 text-xs text-slate-500">
                     <span>{getContentTypeLabel(item.content_type)}</span>
@@ -394,7 +403,7 @@ const MyLibrary: React.FC = () => {
                 {/* Actions */}
                 <div className="flex items-center gap-1">
                   <Link
-                    to={`/create?Topic=${encodeURIComponent(item.topic_text)}&existingId=${item.id}`}
+                    to={`/content/${item.id}`}
                     className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
                   >
                     <Eye size={18} />
@@ -408,7 +417,7 @@ const MyLibrary: React.FC = () => {
           </div>
         </div>
       )}
-    </div>
+    </div >
   );
 };
 

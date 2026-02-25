@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
 import { triggerContentGeneration, supabase } from '../services/supabaseClient';
-import { UserRole, ContentStatus, ContentVersion, ComplianceReview, Profile } from '../types';
+import { UserRole, ContentStatus, ContentVersion, ComplianceReview, Profile, Client } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
   Wand2,
@@ -26,7 +26,12 @@ import {
   Clipboard,
   X,
   Users,
-  ArrowLeft
+  ArrowLeft,
+  BookOpen,
+  ArrowRight,
+  Search,
+  UserPlus,
+  Building2
 } from 'lucide-react';
 
 const GENERATION_STEPS = [
@@ -49,12 +54,14 @@ interface ContentEditorProps {
 }
 
 type TextProvider = 'claude' | 'kimi';
+type ImageProvider = 'gemini' | 'chatgpt';
 
 const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { id } = useParams(); // contentRequestId
-  const [requestId, setRequestId] = useState<string | null>(id || null);
+  const existingId = searchParams.get('existingId');
+  const [requestId, setRequestId] = useState<string | null>(id || existingId || null);
   const clientId = searchParams.get('clientId');
 
   // State
@@ -63,7 +70,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [instructions, setInstructions] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isExtending, setIsExtending] = useState(false);
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [generatedImages, setGeneratedImages] = useState<any[]>([]);
+  const [showImageSelection, setShowImageSelection] = useState(false);
+  const [savingImageIndex, setSavingImageIndex] = useState<number | null>(null);
+  const [generatedTextOptions, setGeneratedTextOptions] = useState<any[]>([]);
+  const [showTextSelection, setShowTextSelection] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Save to Client state
+  const [showClientPicker, setShowClientPicker] = useState(false);
+  const [clientsList, setClientsList] = useState<Client[]>([]);
+  const [clientsLoading, setClientsLoading] = useState(false);
+  const [clientSearch, setClientSearch] = useState('');
+  const [isSavingToClient, setIsSavingToClient] = useState(false);
+  const [savedClientName, setSavedClientName] = useState<string | null>(null);
 
   // Select & Fix State
   const [selectedText, setSelectedText] = useState('');
@@ -75,12 +96,14 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [complianceNote, setComplianceNote] = useState('');
   const editorRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const selectionRafRef = useRef<number | null>(null);
 
   // Content State
   const [content, setContent] = useState<ContentVersion | null>(null);
   const [status, setStatus] = useState<ContentStatus>(ContentStatus.DRAFT);
   const [reviews, setReviews] = useState<ComplianceReview[]>([]);
   const [isLoadingRequest, setIsLoadingRequest] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
 
   const loadRequestData = useCallback(async (requestIdToLoad: string) => {
     setIsLoadingRequest(true);
@@ -128,13 +151,16 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   }, []);
 
   useEffect(() => {
-    if (!id) return;
-    void loadRequestData(id);
-  }, [id, loadRequestData]);
+    const targetId = id || existingId;
+    if (!targetId) return;
+    void loadRequestData(targetId);
+  }, [id, existingId, loadRequestData]);
 
   const [generationMode, setGenerationMode] = useState<'text' | 'image' | 'both'>('text');
   const [textProvider, setTextProvider] = useState<TextProvider>('claude');
+  const [imageProvider, setImageProvider] = useState<ImageProvider>('gemini');
   const [contentLength, setContentLength] = useState<'Short' | 'Medium' | 'Long'>('Medium');
+  const [variationCount, setVariationCount] = useState<number>(1);
   const [generationStep, setGenerationStep] = useState(0);
   const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -352,7 +378,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   };
 
   const handleGenerate = async () => {
-    if (!profile?.org_id) {
+    if (!profile?.id || !profile?.org_id) {
       alert("Missing profile or organization context. Please ensure you are logged in correctly.");
       return;
     }
@@ -360,107 +386,274 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     setIsGenerating(true);
     setGenerationStep(0);
     setError(null);
+
+    // Create specific instructions based on content type
+    let finalInstructions = instructions;
+    if (contentType === 'Social Media Post') {
+      finalInstructions += " Format specifically for LinkedIn/Twitter with engaging hooks and hashtags.";
+    } else if (contentType === 'Client Email') {
+      finalInstructions += " Use a professional email structure with Subject Line.";
+    } else if (contentType === 'Video Script') {
+      finalInstructions += " Use a two-column script format (Visual | Audio).";
+    }
+
     try {
-      let result = {
-        title: topic,
-        body: '',
-        disclaimers: '',
-        generated_by: 'ai'
-      };
+      const currentRequestId = await ensureRequestId();
 
-      // 1. Generate Text (Claude or Kimi)
-      if (generationMode === 'text' || generationMode === 'both') {
-        const textResponse: any = await triggerContentGeneration({
-          topic,
-          contentType,
-          instructions,
-          provider: textProvider,
-          contentLength,
-        });
-
-        result.title = textResponse.data.title;
-        result.body = textResponse.data.body;
-        result.disclaimers = textResponse.data.disclaimers;
-      }
-
-      // 2. Generate Image (Gemini)
-      if (generationMode === 'image' || generationMode === 'both') {
+      if (generationMode === 'image') {
+        // IMAGE-ONLY mode: use the image provider directly
         const imageResponse: any = await triggerContentGeneration({
           topic,
           contentType,
-          instructions,
-          provider: 'gemini',
-          contentLength,
+          instructions: finalInstructions || 'Generate a high-quality financial illustration.',
+          provider: imageProvider,
+          count: variationCount,
         });
 
-        // If Image Only, use Title from Topic
-        if (generationMode === 'image') {
-          result.title = `Visual Asset: ${topic}`;
-          result.body = imageResponse.data.body; // Placeholder or description
-          result.disclaimers = imageResponse.data.disclaimers;
+        // Always create/reset content to image-only (clear any previous text body)
+        const placeholderVersion = await createContentVersion(currentRequestId, {
+          generated_by: 'ai',
+          title: `Visual Asset: ${topic}`,
+          body: '',
+          disclaimers: imageResponse.data?.disclaimers || '',
+        });
+        setContent(placeholderVersion);
+
+        if (imageResponse.data && imageResponse.data.images && imageResponse.data.images.length > 1) {
+          setGeneratedImages(imageResponse.data.images);
+          setShowImageSelection(true);
+        } else if (imageResponse.data) {
+          // Single image fallback — image only, no text
+          const imgHtml = imageResponse.data.body;
+          const savedVersion = await createContentVersion(currentRequestId, {
+            generated_by: 'ai',
+            title: `Visual Asset: ${topic}`,
+            body: imgHtml,
+            disclaimers: imageResponse.data.disclaimers || '',
+          });
+          setContent(savedVersion);
+        }
+      } else {
+        // TEXT or BOTH mode: generate text first
+        let generateResponse: any;
+
+        if (textProvider === 'kimi') {
+          // Kimi API is slower and times out on Supabase Edge Functions when count is high
+          // Workaround: fire separate requests of count: 1 from the client
+          const promises = Array(variationCount).fill(null).map((_, i) =>
+            triggerContentGeneration({
+              topic,
+              contentType,
+              instructions: finalInstructions + (i > 0 ? `\n\nVARIATION INSTRUCTION: Make this variation distinct.` : ''),
+              provider: textProvider,
+              contentLength,
+              count: 1,
+            }).catch(e => ({ error: true, message: e.message }))
+          );
+
+          const results = await Promise.all(promises);
+          const successfulResults = results.filter((r: any) => !r.error && r.data);
+
+          if (successfulResults.length === 0) {
+            throw new Error((results[0] as any)?.message || 'Failed to generate content with Kimi. Please check compute resources.');
+          }
+
+          // Combine the separate calls back into the expected shape
+          generateResponse = {
+            data: {
+              title: successfulResults[0].data.title || successfulResults[0].data.options?.[0]?.title,
+              body: successfulResults[0].data.body || successfulResults[0].data.options?.[0]?.body,
+              disclaimers: successfulResults[0].data.disclaimers || successfulResults[0].data.options?.[0]?.disclaimers,
+              options: successfulResults.map((r: any, idx: number) => ({
+                ...(r.data.options ? r.data.options[0] : r.data),
+                id: idx
+              }))
+            }
+          };
         } else {
-          // If Both, append Image to Body (Top)
-          result.body = `${imageResponse.data.body}<br/><hr/><br/>${result.body}`;
+          // Claude works fine making multiple variations on the edge
+          generateResponse = await triggerContentGeneration({
+            topic,
+            contentType,
+            instructions: finalInstructions,
+            provider: textProvider,
+            contentLength,
+            count: variationCount,
+          });
+        }
+
+        let savedVersion: any = null;
+
+        if (generateResponse.data && generateResponse.data.options && generateResponse.data.options.length > 1) {
+          setGeneratedTextOptions(generateResponse.data.options);
+          setShowTextSelection(true);
+
+          const firstOption = generateResponse.data.options[0];
+          savedVersion = await createContentVersion(currentRequestId, {
+            generated_by: 'ai',
+            title: firstOption.title,
+            body: firstOption.body,
+            disclaimers: firstOption.disclaimers,
+          });
+          setContent(savedVersion);
+        } else if (generateResponse.data) {
+          savedVersion = await createContentVersion(currentRequestId, {
+            generated_by: 'ai',
+            title: generateResponse.data.title,
+            body: generateResponse.data.body,
+            disclaimers: generateResponse.data.disclaimers,
+          });
+          setContent(savedVersion);
+        }
+
+        // BOTH mode: after text is saved, automatically generate an image
+        if (generationMode === 'both' && savedVersion) {
+          try {
+            const imageResponse: any = await triggerContentGeneration({
+              topic,
+              contentType,
+              instructions: finalInstructions || 'Generate a high-quality financial illustration.',
+              provider: imageProvider,
+              currentContent: savedVersion.body,
+              count: variationCount,
+            });
+
+            if (imageResponse.data && imageResponse.data.images && imageResponse.data.images.length > 1) {
+              setGeneratedImages(imageResponse.data.images);
+              setShowImageSelection(true);
+            } else if (imageResponse.data) {
+              const imgHtml = imageResponse.data.body;
+              const newBody = `${imgHtml}<br/><hr/><br/>${savedVersion.body}`;
+              const updatedVersion = await createContentVersion(currentRequestId, {
+                generated_by: 'ai',
+                title: savedVersion.title,
+                body: newBody,
+                disclaimers: savedVersion.disclaimers,
+              });
+              setContent(updatedVersion);
+            }
+          } catch (imgErr: any) {
+            console.error('Image generation failed in Full Article mode:', imgErr);
+            // Don't fail the whole generation — text was already saved
+            setError(`Text generated successfully, but image generation failed: ${imgErr.message}`);
+          }
         }
       }
 
-      // Mark all steps as complete
-      setGenerationStep(GENERATION_STEPS.length);
-
-      const currentRequestId = await ensureRequestId();
-      const savedVersion = await createContentVersion(currentRequestId, {
-        generated_by: 'ai',
-        title: result.title,
-        body: result.body,
-        disclaimers: result.disclaimers,
-      });
-
-      setContent(savedVersion);
-
-      if (!id) {
-        window.history.replaceState(null, '', `#/content/${currentRequestId}`);
-      }
-
-    } catch (e: any) {
-      console.error(e);
-      setError(e.message || "An error occurred while generating content. Please check your API keys and try again.");
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || 'Failed to generate content');
     } finally {
       setIsGenerating(false);
     }
   };
 
+  const selectTextOption = async (option: any) => {
+    if (!requestId) return;
+    try {
+      const savedVersion = await createContentVersion(requestId, {
+        generated_by: 'ai',
+        title: option.title,
+        body: option.body,
+        disclaimers: option.disclaimers,
+      });
+      setContent(savedVersion);
+      setShowTextSelection(false);
+    } catch (e: any) {
+      console.error(e);
+      setError("Failed to switch draft.");
+    }
+  };
 
+  const handleGenerateImage = async () => {
+    if (!content || !requestId) return;
+    setIsGeneratingImage(true);
+    setError(null);
+    setGeneratedImages([]); // Clear previous
+    setShowImageSelection(false);
+
+    try {
+      const imageResponse: any = await triggerContentGeneration({
+        topic,
+        contentType,
+        instructions: instructions || 'Generate a high-quality financial illustration.',
+        provider: imageProvider,
+        currentContent: content.body,
+        count: variationCount,
+      });
+
+      if (imageResponse.data && imageResponse.data.images && imageResponse.data.images.length > 1) {
+        setGeneratedImages(imageResponse.data.images);
+        setShowImageSelection(true);
+      } else if (imageResponse.data) {
+        await selectImage({
+          html: imageResponse.data.body,
+          caption: "Generated Image"
+        });
+      }
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || "Failed to generate image.");
+    } finally {
+      setIsGeneratingImage(false);
+    }
+  };
+
+  const selectImage = async (selectedImage: { html: string, caption?: string }, index?: number) => {
+    if (!content || !requestId) return;
+    setSavingImageIndex(index ?? null);
+
+    try {
+      let newBody = content.body;
+      if (!newBody || newBody.trim() === '') {
+        // Image-only mode: just use the image HTML
+        newBody = selectedImage.html;
+      } else if (newBody.includes('<figure style="margin:0;">') && newBody.indexOf('<figure') < 50) {
+        newBody = newBody.replace(/<figure.*?<\/figure>/s, selectedImage.html);
+      } else {
+        newBody = `${selectedImage.html}<br/><hr/><br/>${content.body}`;
+      }
+
+      const savedVersion = await createContentVersion(requestId, {
+        generated_by: 'ai',
+        title: content.title,
+        body: newBody,
+        disclaimers: content.disclaimers,
+      });
+
+      setContent(savedVersion);
+      setShowImageSelection(false);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || "Failed to save selected image.");
+    } finally {
+      setSavingImageIndex(null);
+    }
+  };
 
   const handleHighlightAnimation = (oldBody: string, newBody: string) => {
     try {
-      // Create temporary elements to parse HTML
       const parser = new DOMParser();
       const oldDoc = parser.parseFromString(oldBody, 'text/html');
       const newDoc = parser.parseFromString(newBody, 'text/html');
-
       const oldTextContent = oldDoc.body.textContent || '';
       const newContainer = document.createElement('div');
       newContainer.innerHTML = newBody;
 
-      // Identify and mark new blocks
       const children = Array.from(newDoc.body.children);
       let modifiedBody = '';
 
       if (children.length > 0) {
         children.forEach((child) => {
           const text = child.textContent?.trim() || '';
-          // Simple heuristic: if block text > 20 chars and not found in old text
-          // It's likely new content
           if (text.length > 20 && !oldTextContent.includes(text)) {
             child.classList.add('new-content-highlight');
           }
           modifiedBody += child.outerHTML;
         });
       } else {
-        // Fallback for simple text or if structure is flat
         modifiedBody = newBody;
       }
-
       return modifiedBody;
     } catch (e) {
       console.error("Animation prep failed", e);
@@ -473,12 +666,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     setIsExtending(true);
     setExtensionStep(0);
     setError(null);
-
-    // Store previous body for diffing
     const previousBody = content.body;
 
     try {
-      // Improve body stripping for context
       const currentBodyText = content.body.replace(/<[^>]*>?/gm, '');
 
       const response: any = await triggerContentGeneration({
@@ -491,7 +681,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         currentContent: currentBodyText
       });
 
-      // Mark all steps as complete
       setExtensionStep(EXTENSION_STEPS.length);
       await new Promise(resolve => setTimeout(resolve, 800));
 
@@ -507,7 +696,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           disclaimers: content.disclaimers,
         });
 
-        // Apply highlight animation
         const highlightedBody = handleHighlightAnimation(previousBody, savedVersion.body);
 
         setContent({
@@ -515,7 +703,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           body: highlightedBody,
         });
 
-        // Remove highlights after animation plays (4s)
         setTimeout(() => {
           setContent(prev => {
             if (!prev) return null;
@@ -565,51 +752,118 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   };
 
-  // --- Select & Fix: Selection Detection ---
-  const handleTextSelection = useCallback(() => {
+  const clearSelectionToolbar = useCallback((preserveComplianceInput = false) => {
+    if (preserveComplianceInput) return;
+    setShowToolbar(false);
+    setSelectedText('');
+    setSelectionRange(null);
+    setToolbarPosition(null);
+    setShowComplianceInput(false);
+    setComplianceNote('');
+  }, []);
+
+  const getSelectionRect = useCallback((range: Range) => {
+    const rect = range.getBoundingClientRect();
+    if (rect.width > 0 || rect.height > 0) {
+      return rect;
+    }
+
+    const rects = range.getClientRects();
+    if (rects.length > 0) {
+      return rects[rects.length - 1] as DOMRect;
+    }
+
+    return null;
+  }, []);
+
+  const calculateToolbarPosition = useCallback((range: Range, complianceOpen: boolean) => {
+    const rect = getSelectionRect(range);
+    if (!rect) return null;
+
+    const estimatedWidth = complianceOpen ? 300 : 440;
+    const estimatedHeight = complianceOpen ? 56 : 44;
+    const viewportPadding = 8;
+
+    const centeredLeft = rect.left + (rect.width / 2) - (estimatedWidth / 2);
+    const maxLeft = window.innerWidth - estimatedWidth - viewportPadding;
+    const left = Math.max(viewportPadding, Math.min(centeredLeft, maxLeft));
+
+    let top = rect.top - estimatedHeight - 12;
+    if (top < viewportPadding) {
+      top = rect.bottom + 12;
+    }
+
+    return {
+      top: Math.max(viewportPadding, top),
+      left,
+    };
+  }, [getSelectionRect]);
+
+  const syncSelectionToolbar = useCallback(() => {
     if (isRewriting) return;
+
     const selection = window.getSelection();
-    if (!selection || selection.isCollapsed || !selection.toString().trim()) {
-      // Only hide if not showing compliance input
-      if (!showComplianceInput) {
-        setShowToolbar(false);
-        setSelectedText('');
-        setSelectionRange(null);
-      }
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.toString().trim()) {
+      clearSelectionToolbar(showComplianceInput);
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!editorRef.current?.contains(range.commonAncestorContainer)) {
+      clearSelectionToolbar(showComplianceInput);
       return;
     }
 
     const text = selection.toString().trim();
-    if (text.length < 5) return;
+    const position = calculateToolbarPosition(range, showComplianceInput);
 
-    // Check if selection is inside our editor
-    const range = selection.getRangeAt(0);
-    if (!editorRef.current?.contains(range.commonAncestorContainer)) return;
+    if (!position) {
+      clearSelectionToolbar(showComplianceInput);
+      return;
+    }
 
     setSelectedText(text);
     setSelectionRange(range.cloneRange());
-
-    // Position toolbar above selection
-    const rect = range.getBoundingClientRect();
-    const editorRect = editorRef.current?.closest('.lg\\:col-span-8')?.getBoundingClientRect();
-    if (editorRect) {
-      setToolbarPosition({
-        top: rect.top - editorRect.top - 55,
-        left: rect.left - editorRect.left + (rect.width / 2) - 120,
-      });
-    }
+    setToolbarPosition(position);
     setShowToolbar(true);
-    setShowComplianceInput(false);
-    setComplianceNote('');
-  }, [isRewriting, showComplianceInput]);
+
+    if (!showComplianceInput) {
+      setComplianceNote('');
+    }
+  }, [calculateToolbarPosition, clearSelectionToolbar, isRewriting, showComplianceInput]);
+
+  const queueSelectionSync = useCallback(() => {
+    if (selectionRafRef.current !== null) {
+      cancelAnimationFrame(selectionRafRef.current);
+    }
+
+    selectionRafRef.current = requestAnimationFrame(() => {
+      selectionRafRef.current = null;
+      syncSelectionToolbar();
+    });
+  }, [syncSelectionToolbar]);
+
+  // --- Select & Fix: Selection Detection ---
+  const handleTextSelection = useCallback(() => {
+    queueSelectionSync();
+  }, [queueSelectionSync]);
+
+  useEffect(() => {
+    document.addEventListener('selectionchange', queueSelectionSync);
+    return () => {
+      document.removeEventListener('selectionchange', queueSelectionSync);
+      if (selectionRafRef.current !== null) {
+        cancelAnimationFrame(selectionRafRef.current);
+        selectionRafRef.current = null;
+      }
+    };
+  }, [queueSelectionSync]);
 
   // Click outside to dismiss toolbar
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (toolbarRef.current && !toolbarRef.current.contains(e.target as Node)) {
-        setShowToolbar(false);
-        setShowComplianceInput(false);
-        setComplianceNote('');
+        clearSelectionToolbar();
       }
     };
     if (showToolbar) {
@@ -622,7 +876,26 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         document.removeEventListener('mousedown', handleClickOutside);
       };
     }
-  }, [showToolbar]);
+  }, [clearSelectionToolbar, showToolbar]);
+
+  useEffect(() => {
+    if (!showToolbar || !selectionRange) return;
+
+    const updatePosition = () => {
+      const position = calculateToolbarPosition(selectionRange, showComplianceInput);
+      if (position) {
+        setToolbarPosition(position);
+      }
+    };
+
+    window.addEventListener('resize', updatePosition);
+    document.addEventListener('scroll', updatePosition, true);
+
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      document.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [calculateToolbarPosition, selectionRange, showComplianceInput, showToolbar]);
 
   // --- Select & Fix: Rewrite Handler ---
   const handleRewrite = async (mode: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance') => {
@@ -706,6 +979,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       setComplianceNote('');
       setSelectedText('');
       setSelectionRange(null);
+      setToolbarPosition(null);
     }
   };
 
@@ -723,6 +997,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       alert("Failed to publish content.");
     }
   };
+
+  const textProviderLabel = textProvider === 'kimi' ? 'Kimi K2.5 (NVIDIA NIM)' : 'Claude';
+  const imageProviderLabel = imageProvider === 'chatgpt' ? 'ChatGPT Image' : 'Gemini Image (Nano Banana)';
+  const imageProviderShortLabel = imageProvider === 'chatgpt' ? 'ChatGPT' : 'Gemini';
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
@@ -773,13 +1051,33 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                 Publish to Portal
               </button>
               {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
-                <button
-                  onClick={() => handleStatusChange(ContentStatus.SUBMITTED)}
-                  disabled={!content}
-                  className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
-                >
-                  {status === ContentStatus.CHANGES_REQUESTED ? 'Resubmit for Review' : 'Submit for Review'} <Send size={16} />
-                </button>
+                <>
+                  <button
+                    onClick={async () => {
+                      if (!requestId) return;
+                      setIsSavingDraft(true);
+                      try {
+                        await saveCurrentEditorVersion(requestId);
+                      } catch (err) {
+                        console.error('Failed to save draft:', err);
+                      } finally {
+                        setIsSavingDraft(false);
+                      }
+                    }}
+                    disabled={!content || isSavingDraft}
+                    className="flex items-center gap-2 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm disabled:opacity-50"
+                  >
+                    {isSavingDraft ? <Loader2 size={16} className="animate-spin" /> : <Clipboard size={16} />}
+                    Save Draft
+                  </button>
+                  <button
+                    onClick={() => handleStatusChange(ContentStatus.SUBMITTED)}
+                    disabled={!content}
+                    className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                  >
+                    {status === ContentStatus.CHANGES_REQUESTED ? 'Resubmit for Review' : 'Submit for Review'} <Send size={16} />
+                  </button>
+                </>
               )}
             </div>
           ) : (
@@ -939,6 +1237,49 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                       </div>
                     </div>
                   )}
+                  {(generationMode === 'image' || generationMode === 'both' || !!content) && (
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Image Engine</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          onClick={() => setImageProvider('gemini')}
+                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'gemini'
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                            }`}
+                        >
+                          Gemini
+                        </button>
+                        <button
+                          onClick={() => setImageProvider('chatgpt')}
+                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'chatgpt'
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                            }`}
+                        >
+                          ChatGPT
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mb-6">
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Number of Variations</label>
+                    <div className="flex gap-2">
+                      {[1, 2, 3, 4, 5, 6].map((num) => (
+                        <button
+                          key={num}
+                          onClick={() => setVariationCount(num)}
+                          className={`flex-1 py-1.5 rounded-lg text-xs font-medium border transition-all ${variationCount === num
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                            }`}
+                        >
+                          {num}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
                   <button
                     onClick={handleGenerate}
@@ -968,6 +1309,40 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                         </>
                       )}
                     </button>
+                  )}
+
+                  {/* Save to Client Button */}
+                  {!isGenerating && content && (
+                    savedClientName ? (
+                      <div className="w-full py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-700 font-medium rounded-lg flex justify-center items-center gap-2 text-sm">
+                        <CheckCircle2 size={16} />
+                        Saved to {savedClientName}
+                      </div>
+                    ) : (
+                      <button
+                        onClick={async () => {
+                          setShowClientPicker(true);
+                          setClientsLoading(true);
+                          try {
+                            const { data, error: fetchError } = await supabase
+                              .from('clients')
+                              .select('*')
+                              .eq('org_id', profile?.org_id)
+                              .order('name');
+                            if (fetchError) throw fetchError;
+                            setClientsList(data || []);
+                          } catch (e: any) {
+                            console.error(e);
+                            setError('Failed to load clients.');
+                          } finally {
+                            setClientsLoading(false);
+                          }
+                        }}
+                        className="w-full py-2.5 bg-white border border-primary-200 text-primary-700 font-medium rounded-lg hover:bg-primary-50 hover:border-primary-300 transition-colors shadow-sm flex justify-center items-center gap-2"
+                      >
+                        <UserPlus size={16} /> Save to Client
+                      </button>
+                    )
                   )}
                 </div>
               )}
@@ -1006,10 +1381,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               <h3 className="text-xl font-display font-bold text-slate-900 mb-2">Generating Your Content</h3>
               <p className="text-sm text-slate-400 mb-10">
                 {generationMode === 'image'
-                  ? 'Powered by Gemini Image (Nano Banana)'
+                  ? `Powered by ${imageProviderLabel}`
                   : generationMode === 'both'
-                    ? `Powered by ${textProvider === 'kimi' ? 'Kimi K2.5' : 'Claude'} + Gemini Image`
-                    : `Powered by ${textProvider === 'kimi' ? 'Kimi K2.5 (NVIDIA NIM)' : 'Claude'}`}
+                    ? `Powered by ${textProviderLabel} + ${imageProviderLabel}`
+                    : `Powered by ${textProviderLabel}`}
               </p>
 
               {/* Progress Bar */}
@@ -1123,7 +1498,37 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   dangerouslySetInnerHTML={{ __html: content.body }}
                   onBlur={(e) => setContent({ ...content, body: e.currentTarget.innerHTML })}
                   onMouseUp={handleTextSelection}
+                  onKeyUp={handleTextSelection}
+                  onTouchEnd={handleTextSelection}
                 />
+
+                {/* Generate Image Button (Only if no image present or as an option) */}
+                {(generationMode === 'text' || generationMode === 'both') && !isExtending && !isGenerating && (
+                  <div className="mt-8 flex justify-center">
+                    <button
+                      onClick={handleGenerateImage}
+                      disabled={isGeneratingImage}
+                      className="group flex items-center gap-3 px-6 py-3 bg-white border-2 border-primary-100 text-primary-700 rounded-2xl font-semibold hover:border-primary-500 hover:bg-primary-50 transition-all duration-300 shadow-sm shadow-primary-50/50 disabled:opacity-50"
+                    >
+                      {isGeneratingImage ? (
+                        <>
+                          <Loader2 size={20} className="animate-spin text-primary-500" />
+                          <span>{imageProviderShortLabel} is Visualizing...</span>
+                        </>
+                      ) : (
+                        <>
+                          <div className="w-8 h-8 rounded-lg bg-primary-100 flex items-center justify-center group-hover:bg-primary-500 group-hover:text-white transition-colors duration-300">
+                            <Sparkles size={18} />
+                          </div>
+                          <div className="text-left">
+                            <p className="text-sm font-bold">Generate Header Image</p>
+                            <p className="text-[10px] text-primary-500 font-medium">Powered by {imageProviderLabel}</p>
+                          </div>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
 
                 {/* Floating Selection Toolbar */}
                 {showToolbar && toolbarPosition && (
@@ -1131,6 +1536,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     ref={toolbarRef}
                     className="selection-toolbar"
                     style={{ top: toolbarPosition.top, left: Math.max(0, toolbarPosition.left) }}
+                    onMouseDown={(e) => {
+                      const target = e.target as HTMLElement;
+                      if (target.tagName !== 'INPUT') {
+                        e.preventDefault();
+                      }
+                    }}
                   >
                     {isRewriting ? (
                       <div className="flex items-center gap-2 px-3 py-1">
@@ -1219,7 +1630,262 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             </div>
           )}
         </div>
+
+        {/* Image Selection Modal */}
+        {showImageSelection && generatedImages.length > 0 && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-xl max-w-5xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-300">
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-gradient-to-r from-slate-50 to-white">
+                <div>
+                  <h3 className="text-xl font-display font-semibold text-slate-900 flex items-center gap-2">
+                    <Sparkles size={20} className="text-primary-500" /> Select a Visual
+                  </h3>
+                  <p className="text-sm text-slate-500 mt-1">{imageProviderShortLabel} generated {generatedImages.length} variations based on your content.</p>
+                </div>
+                <button
+                  onClick={() => setShowImageSelection(false)}
+                  className="p-2 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors"
+                  aria-label="Close"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 bg-slate-50/50">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {generatedImages.map((img, idx) => {
+                    const isSaving = savingImageIndex === idx;
+                    const isOtherSaving = savingImageIndex !== null && savingImageIndex !== idx;
+                    return (
+                      <div
+                        key={idx}
+                        className={`group relative bg-white rounded-xl shadow-sm border overflow-hidden transition-all ${isSaving
+                          ? 'border-primary-400 ring-2 ring-primary-200 shadow-md'
+                          : isOtherSaving
+                            ? 'border-slate-200 opacity-40 cursor-not-allowed'
+                            : 'border-slate-200 hover:shadow-md hover:border-primary-300 cursor-pointer'
+                          }`}
+                        onClick={() => !savingImageIndex && selectImage(img, idx)}
+                      >
+                        <div className="aspect-[4/3] w-full overflow-hidden bg-slate-100 relative">
+                          <div
+                            className="w-full h-full [&>figure]:m-0 [&>figure>img]:w-full [&>figure>img]:h-full [&>figure>img]:object-cover [&>figure>img]:rounded-none [&>figure>figcaption]:hidden pointer-events-none"
+                            dangerouslySetInnerHTML={{ __html: img.html }}
+                          />
+                          {isSaving ? (
+                            <div className="absolute inset-0 bg-primary-900/30 backdrop-blur-[2px] flex flex-col items-center justify-center gap-2 animate-in fade-in duration-200">
+                              <div className="w-12 h-12 rounded-full bg-white/90 flex items-center justify-center shadow-lg">
+                                <Loader2 size={24} className="text-primary-600 animate-spin" />
+                              </div>
+                              <span className="bg-white/90 text-primary-700 px-4 py-1.5 rounded-full text-sm font-semibold shadow-lg">
+                                Saving...
+                              </span>
+                            </div>
+                          ) : !isOtherSaving && (
+                            <div className="absolute inset-0 bg-primary-900/0 group-hover:bg-primary-900/10 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
+                              <span className="bg-white text-primary-600 px-4 py-2 rounded-full font-medium shadow-lg transform translate-y-4 group-hover:translate-y-0 transition-transform">
+                                Select This Image
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="p-4 bg-white">
+                          <p className="text-xs text-slate-500 font-medium uppercase tracking-wide mb-1">Variation {idx + 1}</p>
+                          <p className="text-sm text-slate-700 line-clamp-2" title={img.caption || "Generated concept"}>
+                            {img.caption || "Visual concept focusing on key themes."}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="p-4 border-t border-slate-100 bg-white flex justify-end gap-3">
+                <button
+                  onClick={() => setShowImageSelection(false)}
+                  className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-50 rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleGenerateImage}
+                  disabled={isGeneratingImage}
+                  className="px-4 py-2 bg-slate-900 text-white font-medium rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-2"
+                >
+                  {isGeneratingImage ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                  Generate New Variations
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Text Selection Modal */}
+        {showTextSelection && generatedTextOptions.length > 0 && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[85vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-300">
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-gradient-to-r from-slate-50 to-white">
+                <div>
+                  <h3 className="text-xl font-display font-semibold text-slate-900 flex items-center gap-2">
+                    <BookOpen size={20} className="text-primary-500" /> Choose a Starting Draft
+                  </h3>
+                  <p className="text-sm text-slate-500 mt-1">AI generated {generatedTextOptions.length} distinct variations for you.</p>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 bg-slate-50/50 space-y-4">
+                {generatedTextOptions.map((opt, idx) => (
+                  <div key={idx} className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md hover:border-primary-300 transition-all">
+                    <div className="p-4 border-b border-slate-50 flex items-center justify-between bg-slate-50/50">
+                      <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Variation {idx + 1}</span>
+                      <button
+                        onClick={() => selectTextOption(opt)}
+                        className="text-sm font-medium text-primary-600 hover:text-primary-800 flex items-center gap-1"
+                      >
+                        Select This Draft <ArrowRight size={14} />
+                      </button>
+                    </div>
+                    <div className="p-5">
+                      <h4 className="font-semibold text-slate-800 text-lg mb-2">{opt.title}</h4>
+                      <div className="text-sm text-slate-600 line-clamp-3 leading-relaxed" dangerouslySetInnerHTML={{ __html: opt.body.replace(/<[^>]*>?/gm, '') }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="p-4 border-t border-slate-100 bg-white flex justify-end gap-3">
+                <button
+                  onClick={() => setShowTextSelection(false)}
+                  className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-50 rounded-lg transition-colors"
+                >
+                  Keep Current Selection
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
+
+      {/* Client Picker Modal */}
+      {showClientPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[80vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-300">
+            <div className="p-5 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-display font-semibold text-slate-900 flex items-center gap-2">
+                  <UserPlus size={20} className="text-primary-500" /> Save to Client
+                </h3>
+                <button
+                  onClick={() => { setShowClientPicker(false); setClientSearch(''); }}
+                  className="p-1.5 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="relative">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Search clients..."
+                  value={clientSearch}
+                  onChange={(e) => setClientSearch(e.target.value)}
+                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto">
+              {clientsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 size={24} className="animate-spin text-primary-500" />
+                </div>
+              ) : (() => {
+                const filtered = clientsList.filter(c =>
+                  c.name.toLowerCase().includes(clientSearch.toLowerCase()) ||
+                  (c.company && c.company.toLowerCase().includes(clientSearch.toLowerCase()))
+                );
+                if (filtered.length === 0) {
+                  return (
+                    <div className="py-12 text-center text-slate-400">
+                      <Users size={32} className="mx-auto mb-2 text-slate-300" />
+                      <p className="text-sm font-medium">No clients found</p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="divide-y divide-slate-100">
+                    {filtered.map((client) => {
+                      const initials = client.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+                      const colors = ['bg-blue-500', 'bg-indigo-500', 'bg-violet-500', 'bg-purple-500', 'bg-pink-500', 'bg-rose-500', 'bg-sky-500', 'bg-teal-500'];
+                      const hash = client.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+                      const avatarColor = colors[hash % colors.length];
+                      return (
+                        <button
+                          key={client.id}
+                          disabled={isSavingToClient}
+                          onClick={async () => {
+                            if (!requestId || !content) return;
+                            setIsSavingToClient(true);
+                            try {
+                              // Update content_requests.client_id
+                              const { error: updateErr } = await supabase
+                                .from('content_requests')
+                                .update({ client_id: client.id, updated_at: new Date().toISOString() })
+                                .eq('id', requestId);
+                              if (updateErr) throw updateErr;
+
+                              // Insert into client_content_shares
+                              const { error: shareErr } = await supabase
+                                .from('client_content_shares')
+                                .upsert({
+                                  client_id: client.id,
+                                  content_version_id: content.id,
+                                  shared_at: new Date().toISOString(),
+                                  status: 'unread',
+                                }, { onConflict: 'client_id,content_version_id' });
+                              if (shareErr) throw shareErr;
+
+                              setSavedClientName(client.name);
+                              setShowClientPicker(false);
+                              setClientSearch('');
+                            } catch (e: any) {
+                              console.error(e);
+                              setError(e.message || 'Failed to save to client.');
+                            } finally {
+                              setIsSavingToClient(false);
+                            }
+                          }}
+                          className="w-full flex items-center gap-4 px-5 py-4 hover:bg-primary-50/50 transition-colors text-left disabled:opacity-50"
+                        >
+                          <div className={`flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold text-sm ${avatarColor} shadow-sm`}>
+                            {initials}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-slate-900 truncate">{client.name}</p>
+                            {client.company && (
+                              <p className="text-xs text-slate-500 flex items-center gap-1 mt-0.5 truncate">
+                                <Building2 size={11} /> {client.company}
+                              </p>
+                            )}
+                          </div>
+                          {isSavingToClient ? (
+                            <Loader2 size={16} className="animate-spin text-primary-500 shrink-0" />
+                          ) : (
+                            <ArrowRight size={16} className="text-slate-300 shrink-0" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

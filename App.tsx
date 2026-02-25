@@ -8,6 +8,7 @@ import TopicSelector from './pages/TopicSelector';
 import ContentEditor from './pages/ContentEditor';
 import ClientsList from './pages/ClientsList';
 import ClientDetail from './pages/ClientDetail';
+import MyLibrary from './pages/MyLibrary';
 import Changelog from './pages/Changelog';
 import { UserRole, Profile } from './types';
 import { supabase } from './services/supabaseClient';
@@ -70,11 +71,11 @@ const App: React.FC = () => {
 
   // Demo Profile Fallback
   const effectiveProfile: Profile = profile || {
-    id: 'demo-user',
+    id: '00000000-0000-0000-0000-000000000000',
     name: 'Demo User',
     email: 'demo@example.com',
     role: UserRole.ADVISOR,
-    org_id: 'demo-org'
+    org_id: '00000000-0000-0000-0000-000000000000'
   };
 
   return (
@@ -111,6 +112,12 @@ const App: React.FC = () => {
         <Route path="/clients" element={
           <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
             <ClientsList profile={effectiveProfile} />
+          </Layout>
+        } />
+
+        <Route path="/library" element={
+          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+            <MyLibrary />
           </Layout>
         } />
 

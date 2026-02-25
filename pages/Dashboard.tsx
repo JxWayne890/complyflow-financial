@@ -1,26 +1,198 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { supabase } from '../services/supabaseClient';
 import { UserRole, ContentStatus, Profile } from '../types';
 import StatusBadge from '../components/StatusBadge';
-import { Plus, ArrowRight, Activity, Clock, ShieldCheck, FileText, BarChart3 } from 'lucide-react';
+import { Plus, ArrowRight, Activity, Clock, ShieldCheck, FileText, BarChart3, Loader2 } from 'lucide-react';
 
 interface DashboardProps {
   userRole: UserRole;
   profile: Profile | null;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
-  // Mock data
-  const recentItems = [
-    { id: '1', title: 'Q4 Market Outlook', type: 'Blog Article', status: ContentStatus.IN_REVIEW, date: 'Oct 24, 2023' },
-    { id: '2', title: 'Retirement Planning 101', type: 'LinkedIn Post', status: ContentStatus.APPROVED, date: 'Oct 22, 2023' },
-    { id: '3', title: 'Tax Harvesting Tips', type: 'Video Script', status: ContentStatus.DRAFT, date: 'Oct 20, 2023' },
-  ];
+interface RecentItem {
+  id: string;
+  title: string;
+  type: string;
+  status: ContentStatus;
+  date: string;
+  mode: string;
+}
 
-  const complianceQueue = [
-    { id: '1', title: 'Q4 Market Outlook', advisor: 'John Doe', type: 'Blog', submitted: '2h ago' },
-    { id: '4', title: 'Crypto Risks Update', advisor: 'Sarah Smith', type: 'Facebook', submitted: '5h ago' },
-  ];
+interface ComplianceItem {
+  id: string;
+  title: string;
+  advisor: string;
+  type: string;
+  submitted: string;
+}
+
+const formatRelativeTime = (dateString: string) => {
+  const now = new Date();
+  const date = new Date(dateString);
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+const getContentTypeLabel = (type: string | null) => {
+  switch (type) {
+    case 'blog': return 'Blog Article';
+    case 'linkedin': return 'LinkedIn Post';
+    case 'facebook': return 'Facebook Post';
+    case 'video_script': return 'Video Script';
+    case 'ad': return 'Advertisement';
+    default: return 'Content';
+  }
+};
+
+const getGenerationModeLabel = (mode: string | null, title: string) => {
+  if (mode === 'image' || title.toLowerCase().startsWith('visual asset:')) return 'Visual';
+  if (mode === 'both') return 'Full Article';
+  return 'Written';
+};
+
+const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
+  const [loading, setLoading] = useState(true);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [approvedCount, setApprovedCount] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
+  const [recentItems, setRecentItems] = useState<RecentItem[]>([]);
+  const [complianceQueue, setComplianceQueue] = useState<ComplianceItem[]>([]);
+  const [allDrafts, setAllDrafts] = useState<RecentItem[]>([]);
+
+  useEffect(() => {
+    if (profile?.org_id) {
+      fetchDashboardData();
+    } else {
+      setLoading(false);
+    }
+  }, [profile?.org_id]);
+
+  const fetchDashboardData = async () => {
+    setLoading(true);
+    try {
+      // 1. Fetch all content_requests for metrics
+      const { data: allRequests, error: reqError } = await supabase
+        .from('content_requests')
+        .select('id, status, updated_at, topic_text, content_type, advisor_id')
+        .eq('org_id', profile!.org_id)
+        .order('updated_at', { ascending: false });
+
+      if (reqError) throw reqError;
+
+      const requests = allRequests || [];
+      const pending = requests.filter(r => r.status === 'submitted' || r.status === 'in_review').length;
+      const approved = requests.filter(r => r.status === 'approved').length;
+      setPendingCount(pending);
+      setApprovedCount(approved);
+      setTotalCount(requests.length);
+
+      // 2. Recent Activity (last 5 items with their latest version title)
+      const recentReqs = requests.slice(0, 5);
+      if (recentReqs.length > 0) {
+        const reqIds = recentReqs.map(r => r.id);
+        const { data: versions } = await supabase
+          .from('content_versions')
+          .select('request_id, title, version_number')
+          .in('request_id', reqIds)
+          .order('version_number', { ascending: false });
+
+        const versionMap: Record<string, string> = {};
+        (versions || []).forEach((v: any) => {
+          if (!versionMap[v.request_id] && v.title) {
+            versionMap[v.request_id] = v.title;
+          }
+        });
+
+        const items: RecentItem[] = recentReqs.map(r => {
+          const title = versionMap[r.id] || r.topic_text || 'Untitled';
+          return {
+            id: r.id,
+            title,
+            type: getContentTypeLabel(r.content_type),
+            status: r.status as ContentStatus,
+            date: formatRelativeTime(r.updated_at),
+            mode: getGenerationModeLabel(null, title),
+          };
+        });
+        setRecentItems(items);
+      }
+
+      // 2b. ALL drafts (full list with version titles)
+      if (requests.length > 0) {
+        const allReqIds = requests.map(r => r.id);
+        const { data: allVersions } = await supabase
+          .from('content_versions')
+          .select('request_id, title, version_number')
+          .in('request_id', allReqIds)
+          .order('version_number', { ascending: false });
+
+        const allVersionMap: Record<string, string> = {};
+        (allVersions || []).forEach((v: any) => {
+          if (!allVersionMap[v.request_id] && v.title) {
+            allVersionMap[v.request_id] = v.title;
+          }
+        });
+
+        const drafts: RecentItem[] = requests.map(r => {
+          const title = allVersionMap[r.id] || r.topic_text || 'Untitled';
+          return {
+            id: r.id,
+            title,
+            type: getContentTypeLabel(r.content_type),
+            status: r.status as ContentStatus,
+            date: formatRelativeTime(r.updated_at),
+            mode: getGenerationModeLabel(null, title),
+          };
+        });
+        setAllDrafts(drafts);
+      }
+
+      // 3. Compliance Queue (submitted / in_review items with advisor names)
+      const pendingReqs = requests.filter(r => r.status === 'submitted' || r.status === 'in_review');
+      if (pendingReqs.length > 0) {
+        const advisorIds = [...new Set(pendingReqs.map(r => r.advisor_id).filter(Boolean))];
+        let advisorMap: Record<string, string> = {};
+        if (advisorIds.length > 0) {
+          const { data: advisors } = await supabase
+            .from('profiles')
+            .select('id, name')
+            .in('id', advisorIds);
+          (advisors || []).forEach((a: any) => { advisorMap[a.id] = a.name; });
+        }
+
+        const queueItems: ComplianceItem[] = pendingReqs.slice(0, 10).map(r => ({
+          id: r.id,
+          title: r.topic_text || 'Untitled',
+          advisor: advisorMap[r.advisor_id] || 'Unknown',
+          type: getContentTypeLabel(r.content_type),
+          submitted: formatRelativeTime(r.updated_at),
+        }));
+        setComplianceQueue(queueItems);
+      }
+    } catch (error) {
+      console.error('Error fetching dashboard data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const completionRate = totalCount > 0 ? Math.round((approvedCount / totalCount) * 100) : 0;
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-20">
+        <Loader2 className="animate-spin text-primary-600" size={32} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">
@@ -31,7 +203,7 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
             {userRole === UserRole.ADVISOR ? 'Advisor Dashboard' : 'Compliance Overview'}
           </h1>
           <p className="text-slate-500 text-sm mt-1">
-            Welcome back. You have <span className="font-semibold text-slate-900">{complianceQueue.length} items</span> requiring attention.
+            Welcome back{profile?.name ? `, ${profile.name.split(' ')[0]}` : ''}. You have <span className="font-semibold text-slate-900">{pendingCount} items</span> requiring attention.
           </p>
         </div>
         {userRole === UserRole.ADVISOR && (
@@ -49,11 +221,13 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
             <div className="p-2 bg-amber-50 rounded-lg">
               <Clock size={20} className="text-amber-600" />
             </div>
-            <span className="text-xs font-medium text-slate-400 bg-slate-50 px-2 py-1 rounded-full">+2 today</span>
+            {pendingCount > 0 && (
+              <span className="text-xs font-medium text-amber-600 bg-amber-50 px-2 py-1 rounded-full">{pendingCount} pending</span>
+            )}
           </div>
           <div>
             <p className="text-sm font-medium text-slate-500">Pending Review</p>
-            <h3 className="text-3xl font-display font-bold text-slate-900 mt-1">12</h3>
+            <h3 className="text-3xl font-display font-bold text-slate-900 mt-1">{pendingCount}</h3>
           </div>
         </div>
 
@@ -62,11 +236,13 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
             <div className="p-2 bg-emerald-50 rounded-lg">
               <ShieldCheck size={20} className="text-emerald-600" />
             </div>
-            <span className="text-xs font-medium text-slate-400 bg-slate-50 px-2 py-1 rounded-full">+4 this week</span>
+            {approvedCount > 0 && (
+              <span className="text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">{approvedCount} approved</span>
+            )}
           </div>
           <div>
             <p className="text-sm font-medium text-slate-500">Approved Content</p>
-            <h3 className="text-3xl font-display font-bold text-slate-900 mt-1">8</h3>
+            <h3 className="text-3xl font-display font-bold text-slate-900 mt-1">{approvedCount}</h3>
           </div>
         </div>
 
@@ -75,11 +251,13 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
             <div className="p-2 bg-blue-50 rounded-lg">
               <Activity size={20} className="text-blue-600" />
             </div>
-            <span className="text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">94% rate</span>
+            <span className={`text-xs font-medium px-2 py-1 rounded-full ${completionRate >= 80 ? 'text-emerald-600 bg-emerald-50' : 'text-slate-400 bg-slate-50'}`}>
+              {completionRate}% rate
+            </span>
           </div>
           <div>
             <p className="text-sm font-medium text-slate-500">Completion Rate</p>
-            <h3 className="text-3xl font-display font-bold text-slate-900 mt-1">94%</h3>
+            <h3 className="text-3xl font-display font-bold text-slate-900 mt-1">{completionRate}%</h3>
           </div>
         </div>
       </div>
@@ -94,24 +272,40 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
                 <FileText size={18} className="text-slate-400" />
                 <h3 className="font-semibold text-slate-900">Recent Activity</h3>
               </div>
-              <Link to="/clients" className="text-sm font-medium text-primary-600 hover:text-primary-700">View All</Link>
+              <Link to="/library" className="text-sm font-medium text-primary-600 hover:text-primary-700">View All</Link>
             </div>
             <div className="divide-y divide-slate-100">
-              {recentItems.map(item => (
-                <div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group">
-                  <div className="flex-1 min-w-0 pr-4">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-medium text-slate-500">{item.type}</span>
-                      <span className="text-xs text-slate-300">•</span>
-                      <span className="text-xs text-slate-400">{item.date}</span>
-                    </div>
-                    <Link to={`/content/${item.id}`} className="block text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate">
-                      {item.title}
-                    </Link>
-                  </div>
-                  <StatusBadge status={item.status} />
+              {recentItems.length === 0 ? (
+                <div className="p-12 text-center">
+                  <FileText size={48} className="mx-auto text-slate-200 mb-3" />
+                  <p className="text-slate-500 font-medium">No content yet</p>
+                  <p className="text-sm text-slate-400">Create your first piece of content to see it here.</p>
                 </div>
-              ))}
+              ) : (
+                recentItems.map(item => (
+                  <div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group">
+                    <div className="flex-1 min-w-0 pr-4">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-medium text-slate-500">{item.type}</span>
+                        <span className="text-xs text-slate-300">•</span>
+                        <span className="text-xs text-slate-400">{item.date}</span>
+                      </div>
+                      <Link to={`/content/${item.id}`} className="block text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate">
+                        {item.title}
+                      </Link>
+                      <div className="mt-1">
+                        <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${item.mode === 'Visual' ? 'bg-purple-50 text-purple-600 border border-purple-100' :
+                          item.mode === 'Full Article' ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' :
+                            'bg-slate-50 text-slate-600 border border-slate-100'
+                          }`}>
+                          {item.mode}
+                        </span>
+                      </div>
+                    </div>
+                    <StatusBadge status={item.status} />
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}
@@ -127,95 +321,87 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
               <span className="bg-amber-100 text-amber-800 text-xs font-semibold px-2.5 py-0.5 rounded-full">{complianceQueue.length} Pending</span>
             </div>
             <div className="divide-y divide-slate-100">
-              {complianceQueue.map(item => (
-                <div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group">
-                  <div className="flex-1 min-w-0 pr-4">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="h-5 w-5 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">JD</div>
-                      <span className="text-xs font-medium text-slate-700">{item.advisor}</span>
-                      <span className="text-xs text-slate-300">•</span>
-                      <span className="text-xs text-slate-400">{item.submitted}</span>
-                    </div>
-                    <h4 className="text-base font-semibold text-slate-900 truncate">{item.title}</h4>
-                  </div>
-                  <Link to={`/content/${item.id}`} className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-all">
-                    <ArrowRight size={20} />
-                  </Link>
-                </div>
-              ))}
-              {complianceQueue.length === 0 && (
+              {complianceQueue.length === 0 ? (
                 <div className="p-12 text-center">
                   <ShieldCheck size={48} className="mx-auto text-slate-200 mb-3" />
                   <p className="text-slate-500 font-medium">All caught up!</p>
                   <p className="text-sm text-slate-400">No items pending review.</p>
                 </div>
+              ) : (
+                complianceQueue.map(item => (
+                  <div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group">
+                    <div className="flex-1 min-w-0 pr-4">
+                      <div className="flex items-center gap-2 mb-1">
+                        <div className="h-5 w-5 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">
+                          {item.advisor.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
+                        </div>
+                        <span className="text-xs font-medium text-slate-700">{item.advisor}</span>
+                        <span className="text-xs text-slate-300">•</span>
+                        <span className="text-xs text-slate-400">{item.submitted}</span>
+                      </div>
+                      <h4 className="text-base font-semibold text-slate-900 truncate">{item.title}</h4>
+                    </div>
+                    <Link to={`/content/${item.id}`} className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-all">
+                      <ArrowRight size={20} />
+                    </Link>
+                  </div>
+                ))
               )}
             </div>
           </div>
         )}
+      </div>
 
-        {/* Client View: My Feed */}
-        {userRole === UserRole.CLIENT && (
-          <div className="lg:col-span-2 space-y-6">
-            <div className="bg-indigo-900 rounded-xl p-8 text-white relative overflow-hidden">
-              <div className="absolute top-0 right-0 p-32 bg-indigo-500/10 rounded-full blur-3xl transform translate-x-1/2 -translate-y-1/2"></div>
-              <div className="relative z-10">
-                <h2 className="text-3xl font-display font-bold mb-2">Welcome Back, Sarah</h2>
-                <p className="text-indigo-200 max-w-xl">
-                  Here are the latest insights and updates curated specifically for your portfolio and financial goals.
-                </p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md transition-shadow">
-                <div className="h-48 bg-slate-100 relative">
-                  <div className="absolute inset-0 flex items-center justify-center text-slate-400 bg-slate-200">
-                    <BarChart3 size={48} opacity={0.5} />
+      {/* All My Drafts — Full Width */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+          <div className="flex items-center gap-2">
+            <FileText size={18} className="text-slate-400" />
+            <h3 className="font-semibold text-slate-900">All My Drafts</h3>
+            <span className="bg-slate-100 text-slate-600 text-xs font-semibold px-2 py-0.5 rounded-full">{allDrafts.length}</span>
+          </div>
+          <Link to="/library" className="text-sm font-medium text-primary-600 hover:text-primary-700">Open Library</Link>
+        </div>
+        {allDrafts.length === 0 ? (
+          <div className="p-12 text-center">
+            <FileText size={48} className="mx-auto text-slate-200 mb-3" />
+            <p className="text-slate-500 font-medium">No drafts yet</p>
+            <p className="text-sm text-slate-400 mb-4">Content you create will appear here.</p>
+            <Link to="/topics" className="inline-flex items-center gap-2 text-primary-600 hover:text-primary-700 font-medium text-sm">
+              <Plus size={16} />
+              Create your first draft
+            </Link>
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {allDrafts.map(item => (
+              <div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group">
+                <div className="flex-1 min-w-0 pr-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-medium text-slate-500">{item.type}</span>
+                    <span className="text-xs text-slate-300">•</span>
+                    <span className="text-xs text-slate-400">{item.date}</span>
                   </div>
-                  <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-semibold text-slate-700">
-                    Market Update
+                  <Link to={`/content/${item.id}`} className="block text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate">
+                    {item.title}
+                  </Link>
+                  <div className="mt-1">
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${item.mode === 'Visual' ? 'bg-purple-50 text-purple-600 border border-purple-100' :
+                      item.mode === 'Full Article' ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' :
+                        'bg-slate-50 text-slate-600 border border-slate-100'
+                      }`}>
+                      {item.mode}
+                    </span>
                   </div>
                 </div>
-                <div className="p-6">
-                  <div className="flex items-center gap-2 text-xs text-slate-500 mb-3">
-                    <Clock size={14} />
-                    <span>Oct 24, 2023</span>
-                  </div>
-                  <h3 className="text-xl font-bold text-slate-900 mb-3">Q4 Market Outlook: Navigating Volatility</h3>
-                  <p className="text-slate-600 text-sm line-clamp-3 mb-4">
-                    As we head into the final quarter of 2023, bond yields are offering attractive opportunities for income-focused investors...
-                  </p>
-                  <button className="text-primary-600 font-medium text-sm hover:text-primary-700 flex items-center gap-1">
-                    Read Full Update <ArrowRight size={16} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md transition-shadow">
-                <div className="h-48 bg-slate-100 relative">
-                  <div className="absolute inset-0 flex items-center justify-center text-slate-400 bg-slate-200">
-                    <ShieldCheck size={48} opacity={0.5} />
-                  </div>
-                  <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-semibold text-slate-700">
-                    Planning
-                  </div>
-                </div>
-                <div className="p-6">
-                  <div className="flex items-center gap-2 text-xs text-slate-500 mb-3">
-                    <Clock size={14} />
-                    <span>Oct 22, 2023</span>
-                  </div>
-                  <h3 className="text-xl font-bold text-slate-900 mb-3">Year-End Tax Harvesting Strategies</h3>
-                  <p className="text-slate-600 text-sm line-clamp-3 mb-4">
-                    It's time to review your portfolio for tax-loss harvesting opportunities to offset gains and optimize your tax liability...
-                  </p>
-                  <button className="text-primary-600 font-medium text-sm hover:text-primary-700 flex items-center gap-1">
-                    Read Full Update <ArrowRight size={16} />
-                  </button>
+                <div className="flex items-center gap-3">
+                  <StatusBadge status={item.status} />
+                  <Link to={`/content/${item.id}`} className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-all opacity-0 group-hover:opacity-100">
+                    <ArrowRight size={18} />
+                  </Link>
                 </div>
               </div>
-            </div>
+            ))}
           </div>
         )}
       </div>

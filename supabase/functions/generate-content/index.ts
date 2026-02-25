@@ -1,7 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 
-type Provider = "claude" | "kimi" | "gemini";
+type Provider = "claude" | "kimi" | "gemini" | "chatgpt";
+type ImageProvider = "gemini" | "chatgpt";
 type ContentLength = "Short" | "Medium" | "Long";
 type Action = "generate" | "extend" | "rewrite";
 type RewriteMode = "rewrite" | "shorten" | "expand" | "fix_compliance";
@@ -169,6 +170,50 @@ async function generateImageWithGemini(params: {
   return { html, caption };
 }
 
+async function generateImageWithChatGPT(params: {
+  apiKey: string;
+  model: string;
+  prompt: string;
+}) {
+  const response = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: params.model,
+      prompt: params.prompt,
+      size: "1536x1024",
+    }),
+  });
+
+  const data = await response.json();
+  if (!response.ok || data?.error) {
+    throw new Error(data?.error?.message || `OpenAI API error: ${response.statusText}`);
+  }
+
+  const imagePayload = data?.data?.[0];
+  const caption = (imagePayload?.revised_prompt || "Generated visual concept.").trim();
+  const imageBase64 = imagePayload?.b64_json;
+  const imageUrl = imagePayload?.url;
+
+  if (!imageBase64 && !imageUrl) {
+    return {
+      html: `<p>${escapeHtml(caption)}</p>`,
+      caption,
+    };
+  }
+
+  const src = imageBase64 ? `data:image/png;base64,${imageBase64}` : imageUrl;
+  const html = `<figure style="margin:0;">
+  <img src="${src}" alt="${escapeHtml(caption)}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin-bottom:12px;" />
+  <figcaption style="font-size:14px;color:#64748b;">${escapeHtml(caption)}</figcaption>
+</figure>`;
+
+  return { html, caption };
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -185,6 +230,7 @@ serve(async (req) => {
       currentContent = "",
       rewriteMode = "rewrite",
       complianceNote = "",
+      count = 1,
     }: {
       topic: string;
       contentType: string;
@@ -195,36 +241,98 @@ serve(async (req) => {
       currentContent?: string;
       rewriteMode?: RewriteMode;
       complianceNote?: string;
+      count?: number;
     } = await req.json();
 
     const safeLength = (contentLength in lengthGuides ? contentLength : "Medium") as ContentLength;
     const lengthInstruction = lengthGuides[safeLength];
 
-    if (provider === "gemini") {
-      const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
-      const geminiImageModel = Deno.env.get("GEMINI_IMAGE_MODEL") || "gemini-2.5-flash-image";
-      if (!geminiApiKey) {
-        throw new Error("Missing GEMINI_API_KEY secret.");
+    if (provider === "gemini" || provider === "chatgpt") {
+      const imageProvider: ImageProvider = provider === "chatgpt" ? "chatgpt" : "gemini";
+      const imageModel = imageProvider === "chatgpt"
+        ? Deno.env.get("OPENAI_IMAGE_MODEL") || "gpt-image-1"
+        : Deno.env.get("GEMINI_IMAGE_MODEL") || "gemini-2.5-flash-image";
+      const imageApiKey = imageProvider === "chatgpt"
+        ? Deno.env.get("OPENAI_API_KEY")
+        : Deno.env.get("GEMINI_API_KEY");
+
+      if (!imageApiKey) {
+        throw new Error(
+          imageProvider === "chatgpt"
+            ? "Missing OPENAI_API_KEY secret."
+            : "Missing GEMINI_API_KEY secret.",
+        );
       }
 
-      const imagePrompt = `Create a premium financial marketing visual for "${topic}".
+      let imagePrompt = `Create a premium financial marketing visual for "${topic}".
 Content type: ${contentType || "marketing visual"}.
 Creative direction: ${instructions || "Clean, bold, high-contrast, professional financial aesthetic"}.
 Output style: polished, trustworthy, modern.
 Include no logos, no copyrighted trademarks, and no misleading claims in text.`;
 
-      const imageResult = await generateImageWithGemini({
-        apiKey: geminiApiKey,
-        model: geminiImageModel,
-        prompt: imagePrompt,
+      if (currentContent) {
+        imagePrompt = `Based on the following financial article, create a highly relevant, premium marketing visual.
+        
+Article content:
+"""
+${currentContent.slice(0, 3000)}
+"""
+
+The visual should visually represent the key themes of this article for a ${contentType}.
+Creative direction: ${instructions || "Clean, bold, high-contrast, professional financial aesthetic"}.
+Style: Modern, financial advisor quality, trustworthy.
+No text overlays unless essential. No logos. No faces if possible, focus on conceptual or high-end architectural/abstract financial themes.`;
+      }
+
+      // Generate multiple variations if count > 1
+      const variationPromises = Array.from({ length: Math.min(count, 4) }).map((_, index) => {
+        // Add slight variation to prompt to ensure distinct results if needed, 
+        // though Gemini usually varies by default. We can tweak temperature or seed if API supported it fully.
+        // For now, appending a variation instruction.
+        const variationPrompt = `${imagePrompt}\n\nVariation ${index + 1}: ${index === 0 ? "Focus on broad conceptual themes." :
+          index === 1 ? "Focus on detailed, realistic elements." :
+            index === 2 ? "Use a more abstract, geometric style." :
+              "Use a high-contrast, dramatic lighting style."
+          }`;
+
+        const generator = imageProvider === "chatgpt"
+          ? generateImageWithChatGPT({
+            apiKey: imageApiKey,
+            model: imageModel,
+            prompt: variationPrompt,
+          })
+          : generateImageWithGemini({
+            apiKey: imageApiKey,
+            model: imageModel,
+            prompt: variationPrompt,
+          });
+
+        return generator.then(result => ({
+          id: index,
+          html: result.html,
+          caption: result.caption,
+        })).catch((e) => ({
+          id: index,
+          error: e.message,
+        }));
       });
+
+      const images = await Promise.all(variationPromises);
+      const successfulImages = images.filter((img: any) => !img.error);
+
+      if (successfulImages.length === 0) {
+        throw new Error("Failed to generate any images.");
+      }
 
       return new Response(
         JSON.stringify({
           data: {
+            // For backward compatibility, return the first one as body/disclaimers
             title: `Visual Asset: ${topic}`,
-            body: imageResult.html,
-            disclaimers: `Generated by Gemini (${geminiImageModel}). Investment content is for educational purposes only.`,
+            body: successfulImages[0].html,
+            disclaimers: `Generated by ${imageProvider === "chatgpt" ? "ChatGPT Image" : "Gemini Image"} (${imageModel}). Investment content is for educational purposes only.`,
+            // Return full array for client to select
+            images: successfulImages,
           },
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
@@ -282,104 +390,120 @@ IMPORTANT: Return ONLY the rewritten passage.
     const textProvider = provider === "kimi" ? "kimi" : "claude";
     const maxTokens = action === "rewrite" ? 2048 : maxTokensMap[safeLength];
 
-    let generatedText = "";
-    let providerName = "";
-    let providerModel = "";
+    // Helper to generate a single text variation
+    const generateVariation = async (index: number) => {
+      let variationSystemPrompt = systemPrompt;
+      let variationUserContent = userContent;
 
-    if (textProvider === "kimi") {
-      const nvidiaApiKey = Deno.env.get("NVIDIA_API_KEY");
-      const kimiModel = Deno.env.get("KIMI_TEXT_MODEL") || "moonshotai/kimi-k2.5";
-      if (!nvidiaApiKey) {
-        throw new Error("Missing NVIDIA_API_KEY secret.");
+      // Add variation instructions if requesting multiple
+      if (count > 1) {
+        const variationInstruction =
+          index === 0 ? "Focus on a balanced, standard professional approach." :
+            index === 1 ? "Adopt a slightly more narrative, storytelling approach while maintaining authority." :
+              index === 2 ? "Adopt a more analytical, data-focused structure." :
+                "Focus on actionable key takeaways and practical application.";
+
+        variationUserContent += `\n\nVARIATION INSTRUCTION: ${variationInstruction}`;
       }
 
-      generatedText = await generateWithKimi({
-        apiKey: nvidiaApiKey,
-        model: kimiModel,
-        systemPrompt,
-        userContent,
-        maxTokens,
-        temperature: action === "rewrite" ? 0.7 : 1.0,
-        topP: 1.0,
-      });
+      let text = "";
+      if (textProvider === "kimi") {
+        const nvidiaApiKey = Deno.env.get("NVIDIA_API_KEY");
+        const kimiModel = Deno.env.get("KIMI_TEXT_MODEL") || "moonshotai/kimi-k2.5";
+        if (!nvidiaApiKey) throw new Error("Missing NVIDIA_API_KEY secret.");
 
-      providerName = "Kimi K2.5";
-      providerModel = kimiModel;
-    } else {
-      const claudeApiKey = Deno.env.get("ANTHROPIC_API_KEY");
-      const claudeModel = Deno.env.get("CLAUDE_TEXT_MODEL") || "claude-sonnet-4-20250514";
-      if (!claudeApiKey) {
-        throw new Error("Missing ANTHROPIC_API_KEY secret.");
+        text = await generateWithKimi({
+          apiKey: nvidiaApiKey,
+          model: kimiModel,
+          systemPrompt: variationSystemPrompt,
+          userContent: variationUserContent,
+          maxTokens,
+          temperature: action === "rewrite" ? 0.7 : 0.9, // Slightly higher temp for variations
+          topP: 1.0,
+        });
+      } else {
+        const claudeApiKey = Deno.env.get("ANTHROPIC_API_KEY");
+        const claudeModel = Deno.env.get("CLAUDE_TEXT_MODEL") || "claude-sonnet-4-20250514";
+        if (!claudeApiKey) throw new Error("Missing ANTHROPIC_API_KEY secret.");
+
+        text = await generateWithClaude({
+          apiKey: claudeApiKey,
+          model: claudeModel,
+          systemPrompt: variationSystemPrompt,
+          userContent: variationUserContent,
+          maxTokens,
+          temperature: action === "rewrite" ? 0.6 : 1.0, // Higher temp for distinct variations
+        });
       }
+      return text;
+    };
 
-      generatedText = await generateWithClaude({
-        apiKey: claudeApiKey,
-        model: claudeModel,
-        systemPrompt,
-        userContent,
-        maxTokens,
-        temperature: action === "rewrite" ? 0.6 : 0.9,
-      });
+    // Generate multiple variations if count > 1
+    const variationPromises = Array.from({ length: Math.min(count, 3) }).map((_, index) => {
+      return generateVariation(index)
+        .then(text => ({ id: index, text }))
+        .catch(e => ({ id: index, error: e.message }));
+    });
 
-      providerName = "Claude";
-      providerModel = claudeModel;
+    const results = await Promise.all(variationPromises);
+    const successfulResults = results.filter((r: any) => !r.error);
+
+    if (successfulResults.length === 0) {
+      throw new Error("Failed to generate any content.");
     }
 
+    // Process results into title/body format
+    const formattedResults = successfulResults.map((res: any) => {
+      const lines = res.text.split("\n");
+      let title = lines[0]?.replace(/^#\s*/, "").replace(/\*\*/g, "").trim() || `Generated Content: ${topic}`;
+      let body = lines.slice(1).join("\n").trim();
+      if (!title || title.length < 5) title = `Deep Dive: ${topic}`;
+
+      const htmlBody = body.split("\n\n").map((block: string) => {
+        const trimmed = block.trim();
+        if (!trimmed) return "";
+        if (trimmed.startsWith("###")) return `<h3 style="margin-top: 32px; margin-bottom: 16px; font-weight: 700;">${trimmed.replace(/^###\s*/, "")}</h3>`;
+        if (trimmed.startsWith("##")) return `<h2 style="margin-top: 40px; margin-bottom: 20px; font-weight: 700;">${trimmed.replace(/^##\s*/, "")}</h2>`;
+        if (trimmed.startsWith("#")) return `<h1 style="margin-top: 48px; margin-bottom: 24px; font-weight: 800;">${trimmed.replace(/^#\s*/, "")}</h1>`;
+        return `<p style="margin-bottom: 24px;">${trimmed.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`;
+      }).join("\n");
+
+      return {
+        id: res.id,
+        title,
+        body: htmlBody || "<p>No content generated.</p>",
+        disclaimers: `Generated by ${textProvider === 'kimi' ? 'Kimi K2.5' : 'Claude'}`,
+      };
+    });
+
+    // If Rewrite mode, we just return the first one as raw text for now (handling extensions differently)
     if (action === "rewrite") {
       return new Response(
         JSON.stringify({
           data: {
             title: "",
-            body: generatedText,
-            disclaimers: `Generated by ${providerName} (${providerModel}). Investment content is for educational purposes only.`,
+            body: successfulResults[0].text,
+            disclaimers: `Generated by ${textProvider === 'kimi' ? 'Kimi K2.5' : 'Claude'}`,
           },
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    const lines = generatedText.split("\n");
-    let title =
-      lines[0]?.replace(/^#\s*/, "").replace(/\*\*/g, "").trim() || `Generated Content: ${topic}`;
-    let body = lines.slice(1).join("\n").trim();
-
-    if (!title || title.length < 5) title = `Deep Dive: ${topic}`;
-
-    const htmlBody = body
-      .split("\n\n")
-      .map((block) => {
-        const trimmed = block.trim();
-        if (!trimmed) return "";
-        if (trimmed.startsWith("###"))
-          return `<h3 style="margin-top: 32px; margin-bottom: 16px; font-weight: 700;">${trimmed.replace(
-            /^###\s*/,
-            "",
-          )}</h3>`;
-        if (trimmed.startsWith("##"))
-          return `<h2 style="margin-top: 40px; margin-bottom: 20px; font-weight: 700;">${trimmed.replace(
-            /^##\s*/,
-            "",
-          )}</h2>`;
-        if (trimmed.startsWith("#"))
-          return `<h1 style="margin-top: 48px; margin-bottom: 24px; font-weight: 800;">${trimmed.replace(
-            /^#\s*/,
-            "",
-          )}</h1>`;
-        const formatted = trimmed.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
-        return `<p style="margin-bottom: 24px;">${formatted}</p>`;
-      })
-      .join("\n");
-
     return new Response(
       JSON.stringify({
         data: {
-          title,
-          body: htmlBody || "<p>No content generated.</p>",
-          disclaimers: `Generated by ${providerName} (${providerModel}). Investment content is for educational purposes only.`,
+          // Backward compat
+          title: formattedResults[0].title,
+          body: formattedResults[0].body,
+          disclaimers: formattedResults[0].disclaimers,
+          // New options array
+          options: formattedResults
         },
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
+
   } catch (error) {
     console.error("Internal Error:", error);
     return new Response(

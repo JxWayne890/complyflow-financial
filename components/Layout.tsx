@@ -37,6 +37,7 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile, setRoleOve
   const navItems = [
     { label: 'Dashboard', path: '/', icon: <LayoutDashboard size={18} />, roles: [UserRole.ADMIN, UserRole.ADVISOR, UserRole.COMPLIANCE, UserRole.CLIENT] },
     { label: 'Topics Library', path: '/topics', icon: <PenTool size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
+    { label: 'My Library', path: '/library', icon: <LayoutDashboard size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
     { label: 'Clients', path: '/clients', icon: <Users size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
     { label: 'Review Queue', path: '/compliance', icon: <ShieldCheck size={18} />, roles: [UserRole.COMPLIANCE, UserRole.ADMIN] },
     { label: 'Changelog', path: '/changelog', icon: <HistoryIcon size={18} />, roles: [UserRole.ADMIN, UserRole.ADVISOR, UserRole.COMPLIANCE] },

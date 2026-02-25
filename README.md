@@ -15,10 +15,12 @@ AI provider keys should be configured as Supabase Edge Function secrets (not in 
 ```bash
 supabase secrets set ANTHROPIC_API_KEY=your_anthropic_key
 supabase secrets set GEMINI_API_KEY=your_gemini_key
+supabase secrets set OPENAI_API_KEY=your_openai_key
 supabase secrets set NVIDIA_API_KEY=your_nvidia_key
 supabase secrets set CLAUDE_TEXT_MODEL=claude-opus-4-5
 supabase secrets set KIMI_TEXT_MODEL=moonshotai/kimi-k2.5
 supabase secrets set GEMINI_IMAGE_MODEL=gemini-2.5-flash-image
+supabase secrets set OPENAI_IMAGE_MODEL=gpt-image-1
 ```
 
 ### 2. Supabase Setup

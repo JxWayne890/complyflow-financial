@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS content_requests (
   instructions text,
   status text CHECK (status IN ('draft', 'submitted', 'in_review', 'changes_requested', 'approved', 'scheduled', 'posted', 'rejected')),
   current_version_id uuid, -- Circular reference updated later
+  generation_mode text DEFAULT 'text',
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now()
 );
