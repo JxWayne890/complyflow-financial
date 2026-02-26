@@ -246,6 +246,7 @@ serve(async (req) => {
       rewriteMode = "rewrite",
       complianceNote = "",
       count = 1,
+      videoDuration,
     }: {
       topic: string;
       contentType: string;
@@ -257,6 +258,7 @@ serve(async (req) => {
       rewriteMode?: RewriteMode;
       complianceNote?: string;
       count?: number;
+      videoDuration?: number;
     } = await req.json();
 
     const safeLength = (contentLength in lengthGuides ? contentLength : "Medium") as ContentLength;
@@ -365,7 +367,26 @@ If comparing two sets of metrics across categories, include dataKey2, dataLabel2
 
     if (contentType && (contentType.toLowerCase() === "video script" || contentType.toLowerCase() === "video_script")) {
       systemPrompt = meritVideoStyle;
-      userContent = `Create a YouTube video script about: ${topic}. \n\nTarget Length: ${lengthInstruction}\n\nContext/Instructions: ${instructions}`;
+
+      // Build video-specific length instruction
+      let videoLengthInstruction = "";
+      if (safeLength === "Short") {
+        const mins = videoDuration || 1;
+        videoLengthInstruction = `This is a SHORT-FORM video script. Target duration: exactly ${mins} minute${mins > 1 ? 's' : ''}. ` +
+          `This is for YouTube Shorts, Instagram Reels, TikTok, or Facebook Reels. ` +
+          `Be extremely concise and punchy. Get to the point fast. ` +
+          `Use only 2-4 timestamp segments. The final timestamp should not exceed ${mins}:00.`;
+      } else if (safeLength === "Medium") {
+        videoLengthInstruction = `This is a MEDIUM-LENGTH video script. Target duration: approximately 8-9 minutes. ` +
+          `Cover the topic thoroughly with 6-10 clear segments. ` +
+          `Use timestamps from [00:00] through approximately [08:00]-[09:00].`;
+      } else {
+        videoLengthInstruction = `This is a LONG-FORM video script. Target duration: 10 minutes MINIMUM, can go up to 15-20 minutes. ` +
+          `Provide a comprehensive, in-depth educational walkthrough. ` +
+          `Use many timestamp segments. Go deep on each point with examples and analogies.`;
+      }
+
+      userContent = `Create a YouTube video script about: ${topic}. \n\n${videoLengthInstruction}\n\nContext/Instructions: ${instructions}`;
     } else if (
       contentType &&
       (contentType.toLowerCase().includes("video") ||

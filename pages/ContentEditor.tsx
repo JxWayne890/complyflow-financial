@@ -177,10 +177,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [textProvider, setTextProvider] = useState<TextProvider>('claude');
   const [imageProvider, setImageProvider] = useState<ImageProvider>('gemini');
   const [contentLength, setContentLength] = useState<'Short' | 'Medium' | 'Long'>('Medium');
+  const [shortDuration, setShortDuration] = useState<1 | 2 | 3>(1);
   const [variationCount, setVariationCount] = useState<number>(1);
   const [chartData, setChartData] = useState<any | null>(null);
   const [generationStep, setGenerationStep] = useState(0);
   const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isVideoScript = contentType === 'video_script';
 
   const [extensionStep, setExtensionStep] = useState(0);
   const extensionTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -494,6 +496,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               provider: textProvider,
               contentLength,
               count: 1,
+              ...(isVideoScript ? { videoDuration: contentLength === 'Short' ? shortDuration : undefined } : {}),
             }).catch(e => ({ error: true, message: e.message }))
           );
 
@@ -525,6 +528,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             provider: textProvider,
             contentLength,
             count: variationCount,
+            ...(isVideoScript ? { videoDuration: contentLength === 'Short' ? shortDuration : undefined } : {}),
           });
         }
 
@@ -1253,7 +1257,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Length</label>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                  {isVideoScript ? 'Video Length' : 'Length'}
+                </label>
                 <div className="grid grid-cols-3 gap-2">
                   <button
                     onClick={() => setContentLength('Short')}
@@ -1262,7 +1268,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                       : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
                       }`}
                   >
-                    Short
+                    {isVideoScript ? 'Short (1-3 min)' : 'Short'}
                   </button>
                   <button
                     onClick={() => setContentLength('Medium')}
@@ -1271,7 +1277,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                       : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
                       }`}
                   >
-                    Medium
+                    {isVideoScript ? 'Medium (~8 min)' : 'Medium'}
                   </button>
                   <button
                     onClick={() => setContentLength('Long')}
@@ -1280,9 +1286,31 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                       : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
                       }`}
                   >
-                    Long
+                    {isVideoScript ? 'Long (10+ min)' : 'Long'}
                   </button>
                 </div>
+
+                {/* Sub-duration selector for Video Script + Short */}
+                {isVideoScript && contentLength === 'Short' && (
+                  <div className="mt-3">
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Duration (minutes)</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {([1, 2, 3] as const).map((min) => (
+                        <button
+                          key={min}
+                          onClick={() => setShortDuration(min)}
+                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${shortDuration === min
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                            }`}
+                        >
+                          {min} min
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-1">Perfect for YouTube Shorts, Reels & TikTok</p>
+                  </div>
+                )}
               </div>
 
               <div>
