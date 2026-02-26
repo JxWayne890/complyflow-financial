@@ -98,52 +98,66 @@ const MyLibrary: React.FC = () => {
   const fetchContent = async () => {
     setLoading(true);
     try {
-      const { data: userData } = await supabase.auth.getUser();
-      if (!userData.user) return;
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setLoading(false); return; }
 
-      // Fetch requests and their latest version
-      const { data, error } = await supabase
+      // 1. Fetch user profile to get org_id
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('org_id')
+        .eq('id', user.id)
+        .single();
+
+      // 2. Fetch content requests (lightweight)
+      let query = supabase
         .from('content_requests')
-        .select(`
-                id, topic, status, updated_at, created_at, content_type,
-                content_versions (
-                    id, version_number, title, body, created_at
-                )
-            `)
-        .order('updated_at', { ascending: false });
+        .select('id, topic_text, status, updated_at, created_at, content_type, current_version_id')
+        .order('updated_at', { ascending: false })
+        .limit(100);
 
-      if (error) throw error;
-
-      if (data) {
-        const formattedContent: ContentItem[] = data.map((item: any) => {
-          // Find latest version
-          const versions = item.content_versions || [];
-          const latestVersion = versions.sort((a: any, b: any) =>
-            new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-          )[0];
-
-          let title = item.topic; // Default title is topic
-          let excerpt = '';
-          let type = (item.content_type as ContentType) || ContentType.BLOG;
-
-          if (latestVersion) {
-            if (latestVersion.title) title = latestVersion.title;
-            if (latestVersion.body) excerpt = latestVersion.body.substring(0, 150) + '...';
-          }
-
-          return {
-            id: item.id,
-            title: title,
-            topic_text: item.topic,
-            content_type: type,
-            status: item.status as ContentStatus,
-            updated_at: item.updated_at || item.created_at,
-            excerpt: excerpt,
-            mode: getGenerationModeLabel(null, title)
-          };
-        });
-        setContent(formattedContent);
+      if (profile?.org_id) {
+        query = query.eq('org_id', profile.org_id);
       }
+
+      const { data: requests, error: reqError } = await query;
+      if (reqError) throw reqError;
+      if (!requests || requests.length === 0) { setContent([]); setLoading(false); return; }
+
+      // 3. Batch-fetch only titles (NO body — that's the slow part)
+      const versionIds = requests
+        .map((r: any) => r.current_version_id)
+        .filter(Boolean);
+
+      let versionMap: Record<string, string> = {};
+      if (versionIds.length > 0) {
+        const { data: versions } = await supabase
+          .from('content_versions')
+          .select('id, title')
+          .in('id', versionIds);
+
+        (versions || []).forEach((v: any) => {
+          if (v.title) versionMap[v.id] = v.title;
+        });
+      }
+
+      // 4. Assemble the content list
+      const formattedContent: ContentItem[] = requests.map((item: any) => {
+        const versionTitle = item.current_version_id ? versionMap[item.current_version_id] : null;
+        const title = versionTitle || item.topic_text || 'Untitled';
+        const type = (item.content_type as ContentType) || ContentType.BLOG;
+
+        return {
+          id: item.id,
+          title,
+          topic_text: item.topic_text || '',
+          content_type: type,
+          status: item.status as ContentStatus,
+          updated_at: item.updated_at || item.created_at,
+          excerpt: item.topic_text || '',
+          mode: getGenerationModeLabel(null, title)
+        };
+      });
+      setContent(formattedContent);
     } catch (error) {
       console.error('Error fetching content:', error);
     } finally {
@@ -286,23 +300,29 @@ const MyLibrary: React.FC = () => {
           )}
         </div>
       ) : viewMode === 'grid' ? (
-        /* Grid View */
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+        /* Grid View (Mobile List -> Desktop Grid) */
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-0 md:gap-5 divide-y divide-slate-100 md:divide-none bg-white md:bg-transparent rounded-xl md:rounded-none shadow-sm md:shadow-none border border-slate-200 md:border-none">
           {filteredContent.map(item => (
             <div
               key={item.id}
-              className="group bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-lg hover:border-slate-300 transition-all duration-300"
+              className="group relative p-4 md:p-0 md:bg-white md:rounded-xl md:shadow-sm md:border md:border-slate-200 overflow-hidden hover:bg-slate-50 md:hover:bg-white md:hover:shadow-lg md:hover:border-slate-300 transition-all duration-300 flex flex-col md:block"
             >
               {/* Card Header */}
-              <div className="p-5 pb-4">
-                <div className="flex items-start justify-between mb-3">
-                  <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${getContentTypeColor(item.content_type)}`}>
+              <div className="md:p-5 md:pb-4 flex-1">
+                <div className="flex items-start justify-between mb-2 md:mb-3">
+                  {/* Type Badge (Shrinks to just icon on mobile) */}
+                  <div className={`inline-flex items-center justify-center md:justify-start gap-1.5 w-8 h-8 md:w-auto md:h-auto md:px-2.5 md:py-1 rounded-full md:text-xs font-medium ${getContentTypeColor(item.content_type)}`}>
                     {getContentTypeIcon(item.content_type)}
-                    {getContentTypeLabel(item.content_type)}
+                    <span className="hidden md:inline">{getContentTypeLabel(item.content_type)}</span>
                   </div>
+
+                  {/* Actions Dropdown */}
                   <div className="relative">
                     <button
-                      onClick={() => setActiveDropdown(activeDropdown === item.id ? null : item.id)}
+                      onClick={(e) => {
+                        e.preventDefault(); // Prevent triggering card link
+                        setActiveDropdown(activeDropdown === item.id ? null : item.id);
+                      }}
                       className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
                     >
                       <MoreVertical size={16} />
@@ -326,13 +346,15 @@ const MyLibrary: React.FC = () => {
                   </div>
                 </div>
 
-                <Link to={`/content/${item.id}`}>
-                  <h3 className="text-lg font-semibold text-slate-900 mb-1 group-hover:text-primary-600 transition-colors line-clamp-2">
+                <Link to={`/content/${item.id}`} className="block">
+                  <h3 className="text-base md:text-lg font-semibold text-slate-900 mb-1 group-hover:text-primary-600 transition-colors line-clamp-2 md:line-clamp-2 pr-8 md:pr-0">
                     {item.title}
                   </h3>
                 </Link>
-                <div className="mb-3">
-                  <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${item.mode === 'Visual' ? 'bg-purple-50 text-purple-600 border border-purple-100' :
+
+                {/* Generation Mode Badge */}
+                <div className="mb-2 md:mb-3 mt-1 md:mt-0">
+                  <span className={`text-[9px] md:text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${item.mode === 'Visual' ? 'bg-purple-50 text-purple-600 border border-purple-100' :
                     item.mode === 'Full Article' ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' :
                       'bg-slate-50 text-slate-600 border border-slate-100'
                     }`}>
@@ -340,23 +362,40 @@ const MyLibrary: React.FC = () => {
                   </span>
                 </div>
 
-                <p className="text-sm text-slate-500 line-clamp-2 mb-4">
+                {/* Excerpt (Hidden on mobile) */}
+                <p className="hidden md:block text-sm text-slate-500 line-clamp-2 mb-4">
                   {item.excerpt || item.topic_text}
                 </p>
+
+                {/* Mobile Meta (Date & Status inline) */}
+                <div className="md:hidden flex items-center justify-between mt-2 pt-2 border-t border-slate-100">
+                  <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                    <Calendar size={12} />
+                    {formatDate(item.updated_at)}
+                  </div>
+                  <div className="scale-90 origin-right">
+                    <StatusBadge status={item.status} />
+                  </div>
+                </div>
               </div>
 
-              {/* Card Footer */}
-              < div className="px-5 py-3 bg-slate-50/50 border-t border-slate-100 flex items-center justify-between" >
+              {/* Desktop Card Footer (Hidden on mobile) */}
+              <div className="hidden md:flex px-5 py-3 bg-slate-50/50 border-t border-slate-100 items-center justify-between">
                 <div className="flex items-center gap-1.5 text-xs text-slate-400">
                   <Calendar size={12} />
                   {formatDate(item.updated_at)}
                 </div>
                 <StatusBadge status={item.status} />
               </div>
+
+              {/* Invisible clickable overlay for mobile convenience */}
+              <Link to={`/content/${item.id}`} className="md:hidden absolute inset-0 z-0" aria-label={`Open ${item.title}`} />
+              <div className="md:hidden relative z-10 pointer-events-none absolute top-3 right-3 text-slate-300 group-hover:text-primary-400 transition-colors">
+                {/* Mobile chevron indicator removed for cleaner look, clickable area still exists */}
+              </div>
             </div>
-          ))
-          }
-        </div >
+          ))}
+        </div>
       ) : (
         /* List View */
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">

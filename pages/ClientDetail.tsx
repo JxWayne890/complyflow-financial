@@ -144,53 +144,56 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
 
             if (clientError) throw clientError;
 
-            // 2. Fetch Shared Content
-            const { data: sharesData, error: sharesError } = await supabase
-                .from('client_content_shares')
-                .select(`
-                    id, shared_at, status,
-                    content_versions (
-                        id, created_at, title, body,
-                        content_requests (
-                            id, topic, status, content_type
-                        )
-                    )
-                `)
-                .eq('client_id', clientId)
-                .order('shared_at', { ascending: false });
-
-            if (sharesError) throw sharesError;
-
-            // Transform Shared Content
-            const formattedShares: SharedContentItem[] = (sharesData || []).map((share: any) => {
-                const version = share.content_versions;
-                const request = version?.content_requests;
-
-                let title = version?.title || request?.topic || 'Untitled Content';
-                let type = request?.content_type || ContentType.BLOG;
-
-                return {
-                    id: share.id, // Share ID
-                    content_id: request?.id, // Original Request ID
-                    title: title,
-                    content_type: type,
-                    status: share.status as ContentStatus, // unread/read map to status? Or use request status?
-                    // Actually, 'unread'/'read' is the share status. 
-                    // But we might want to show the content status (e.g. Approved) or just 'Shared'.
-                    // For now, let's use the share status as a proxy or just 'Shared'
-                    updated_at: request?.updated_at || share.shared_at,
-                    shared_at: share.shared_at
-                };
-            });
-
-            setSharedContent(formattedShares);
-
-            // Set Client Data
+            // Set client data immediately so it renders even if shares fail
             setClient({
                 ...clientData,
-                contentCount: formattedShares.length,
-                socialAccounts: [] // Mock for now
+                contentCount: 0,
+                socialAccounts: []
             });
+
+            // 2. Fetch Shared Content (separate try/catch so client still shows)
+            try {
+                const { data: sharesData, error: sharesError } = await supabase
+                    .from('client_content_shares')
+                    .select(`
+                        id, shared_at, status,
+                        content_versions (
+                            id, created_at, title, body,
+                            content_requests (
+                                id, topic_text, status, content_type
+                            )
+                        )
+                    `)
+                    .eq('client_id', clientId)
+                    .order('shared_at', { ascending: false });
+
+                if (sharesError) throw sharesError;
+
+                // Transform Shared Content
+                const formattedShares: SharedContentItem[] = (sharesData || []).map((share: any) => {
+                    const version = share.content_versions;
+                    const request = version?.content_requests;
+
+                    let title = version?.title || request?.topic_text || 'Untitled Content';
+                    let type = request?.content_type || ContentType.BLOG;
+
+                    return {
+                        id: share.id,
+                        content_id: request?.id,
+                        title: title,
+                        content_type: type,
+                        status: share.status as ContentStatus,
+                        updated_at: request?.updated_at || share.shared_at,
+                        shared_at: share.shared_at
+                    };
+                });
+
+                setSharedContent(formattedShares);
+                setClient(prev => prev ? { ...prev, contentCount: formattedShares.length } : prev);
+            } catch (shareError) {
+                console.error("Error fetching shared content:", shareError);
+                // Client still renders; shares section will just be empty
+            }
 
         } catch (error) {
             console.error("Error fetching client details:", error);

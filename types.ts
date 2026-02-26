@@ -96,6 +96,7 @@ export interface ContentVersion {
   body: string;
   disclaimers?: string;
   compliance_notes?: string;
+  chart_data?: any;
   created_at: string;
 }
 

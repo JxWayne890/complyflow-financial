@@ -340,7 +340,13 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
     }
 
     let systemPrompt = legacyWealthStyle;
-    let userContent = `Write a ${contentType} about ${topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}`;
+    let userContent = `Write a ${contentType} about ${topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}
+
+If the topic involves data, trends, asset allocation, or comparisons, you MUST append a JSON block to the very end of your response formatted exactly like this:
+<script type="application/json" id="chart-data">
+{"title": "Chart Title", "type": "bar", "dataLabel": "Metric 1 (e.g. 2023 Yield %)", "dataKey2": "value2", "dataLabel2": "Metric 2 (optional, e.g. 2024 Yield %)", "data": [{"name": "Category A", "value": 10, "value2": 15}, {"name": "Category B", "value": 20, "value2": 25}]}
+</script>
+If comparing two sets of metrics across categories, include dataKey2, dataLabel2, and value2. Otherwise, omit them. Do not put this script block inside markdown formatting. The type can be 'bar', 'line', or 'pie'.`;
 
     if (
       contentType &&
@@ -454,10 +460,22 @@ IMPORTANT: Return ONLY the rewritten passage.
 
     // Process results into title/body format
     const formattedResults = successfulResults.map((res: any) => {
-      const lines = res.text.split("\n");
+      let rawText = res.text.trim();
+      if (rawText.startsWith("```")) {
+        // Strip the opening markdown tag
+        rawText = rawText.replace(/^```[A-Za-z]*\n/i, "");
+        // Strip the closing markdown tag
+        rawText = rawText.replace(/\n```$/, "");
+        rawText = rawText.trim();
+      }
+
+      const lines = rawText.split("\n");
       let title = lines[0]?.replace(/^#\s*/, "").replace(/\*\*/g, "").trim() || `Generated Content: ${topic}`;
       let body = lines.slice(1).join("\n").trim();
-      if (!title || title.length < 5) title = `Deep Dive: ${topic}`;
+      if (!title || title.length < 5) {
+        // Fallback if title is missing or empty
+        title = `Deep Dive: ${topic}`;
+      }
 
       const htmlBody = body.split("\n\n").map((block: string) => {
         const trimmed = block.trim();

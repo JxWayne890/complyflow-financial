@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS content_versions (
   body text,
   disclaimers text,
   compliance_notes text,
+  chart_data jsonb,
   created_at timestamp with time zone DEFAULT now()
 );
 
@@ -247,3 +248,9 @@ USING (
     AND clients.org_id = get_auth_org_id()
   )
 );
+-- Add foreign key constraint for current_version_id
+ALTER TABLE content_requests 
+ADD CONSTRAINT fk_current_version 
+FOREIGN KEY (current_version_id) 
+REFERENCES content_versions(id) 
+ON DELETE SET NULL;

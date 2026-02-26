@@ -31,8 +31,24 @@ import {
   ArrowRight,
   Search,
   UserPlus,
-  Building2
+  Building2,
+  BarChart3
 } from 'lucide-react';
+import {
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  PieChart,
+  Pie,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer
+} from 'recharts';
 
 const GENERATION_STEPS = [
   { id: 0, label: 'Connecting to AI Engine', icon: Sparkles, duration: 1500 },
@@ -161,6 +177,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [imageProvider, setImageProvider] = useState<ImageProvider>('gemini');
   const [contentLength, setContentLength] = useState<'Short' | 'Medium' | 'Long'>('Medium');
   const [variationCount, setVariationCount] = useState<number>(1);
+  const [chartData, setChartData] = useState<any | null>(null);
   const [generationStep, setGenerationStep] = useState(0);
   const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -265,6 +282,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     title: string;
     body: string;
     disclaimers?: string;
+    chart_data?: any;
   }) => {
     const nextVersion = (content?.version_number || 0) + 1;
     const { data: versionData, error: versionError } = await supabase
@@ -276,6 +294,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         title: payload.title,
         body: payload.body,
         disclaimers: payload.disclaimers || null,
+        chart_data: payload.chart_data || null,
       })
       .select('*')
       .single();
@@ -374,6 +393,32 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     } catch (e: any) {
       console.error(e);
       setError(e.message || 'Failed to record compliance decision.');
+    }
+  };
+
+  const extractChartData = (htmlBody: string): { body: string; chartData: any | null } => {
+    try {
+      const regex = /<script[^>]*id=["']chart-data["'][^>]*>([\s\S]*?)<\/script>/i;
+      const match = htmlBody.match(regex);
+
+      if (!match) return { body: htmlBody, chartData: null };
+
+      let jsonString = match[1].trim();
+      // Remove markdown formatting if the AI added it inside or around the script tag
+      jsonString = jsonString.replace(/^```(json)?\s*/i, '').replace(/```$/, '').trim();
+
+      const parsedData = JSON.parse(jsonString);
+
+      let cleanedBody = htmlBody.replace(match[0], '');
+      // Clean up stray markdown artifacts and empty paragraphs left behind
+      cleanedBody = cleanedBody.replace(/<p>\s*```(?:html|json)?\s*<\/p>/gi, '');
+      cleanedBody = cleanedBody.replace(/```(?:html|json)?/gi, '');
+      cleanedBody = cleanedBody.replace(/<p>\s*<\/p>/gi, '');
+
+      return { body: cleanedBody.trim(), chartData: parsedData };
+    } catch (e) {
+      console.error("Failed to parse chart data from AI response", e);
+      return { body: htmlBody, chartData: null };
     }
   };
 
@@ -485,10 +530,18 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         let savedVersion: any = null;
 
         if (generateResponse.data && generateResponse.data.options && generateResponse.data.options.length > 1) {
-          setGeneratedTextOptions(generateResponse.data.options);
+          // Process options for chart data
+          const processedOptions = generateResponse.data.options.map((opt: any) => {
+            const { body, chartData } = extractChartData(opt.body);
+            return { ...opt, body, chartData };
+          });
+
+          setGeneratedTextOptions(processedOptions);
           setShowTextSelection(true);
 
-          const firstOption = generateResponse.data.options[0];
+          const firstOption = processedOptions[0];
+          if (firstOption.chartData) setChartData(firstOption.chartData);
+
           savedVersion = await createContentVersion(currentRequestId, {
             generated_by: 'ai',
             title: firstOption.title,
@@ -497,10 +550,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           });
           setContent(savedVersion);
         } else if (generateResponse.data) {
+          const { body: cleanedBody, chartData: parsedChartData } = extractChartData(generateResponse.data.body);
+          if (parsedChartData) setChartData(parsedChartData);
+
           savedVersion = await createContentVersion(currentRequestId, {
             generated_by: 'ai',
             title: generateResponse.data.title,
-            body: generateResponse.data.body,
+            body: cleanedBody,
             disclaimers: generateResponse.data.disclaimers,
           });
           setContent(savedVersion);
@@ -551,6 +607,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const selectTextOption = async (option: any) => {
     if (!requestId) return;
     try {
+      if (option.chartData) setChartData(option.chartData);
+
       const savedVersion = await createContentVersion(requestId, {
         generated_by: 'ai',
         title: option.title,
@@ -1083,6 +1141,40 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           ) : (
             <StatusBadge status={status} />
           )}
+
+          {/* Save to Client — ALWAYS visible when content exists */}
+          {content && (
+            savedClientName ? (
+              <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-2 rounded-lg text-sm font-medium shadow-sm">
+                <CheckCircle2 size={16} />
+                Saved to {savedClientName}
+              </div>
+            ) : (
+              <button
+                onClick={async () => {
+                  setShowClientPicker(true);
+                  setClientsLoading(true);
+                  try {
+                    const { data, error: fetchError } = await supabase
+                      .from('clients')
+                      .select('*')
+                      .eq('org_id', profile?.org_id)
+                      .order('name');
+                    if (fetchError) throw fetchError;
+                    setClientsList(data || []);
+                  } catch (e: any) {
+                    console.error(e);
+                    setError('Failed to load clients.');
+                  } finally {
+                    setClientsLoading(false);
+                  }
+                }}
+                className="flex items-center gap-2 bg-white border border-primary-200 text-primary-700 hover:bg-primary-50 hover:border-primary-300 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+              >
+                <UserPlus size={16} /> Save to Client
+              </button>
+            )
+          )}
         </div>
       </div>
 
@@ -1311,39 +1403,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     </button>
                   )}
 
-                  {/* Save to Client Button */}
-                  {!isGenerating && content && (
-                    savedClientName ? (
-                      <div className="w-full py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-700 font-medium rounded-lg flex justify-center items-center gap-2 text-sm">
-                        <CheckCircle2 size={16} />
-                        Saved to {savedClientName}
-                      </div>
-                    ) : (
-                      <button
-                        onClick={async () => {
-                          setShowClientPicker(true);
-                          setClientsLoading(true);
-                          try {
-                            const { data, error: fetchError } = await supabase
-                              .from('clients')
-                              .select('*')
-                              .eq('org_id', profile?.org_id)
-                              .order('name');
-                            if (fetchError) throw fetchError;
-                            setClientsList(data || []);
-                          } catch (e: any) {
-                            console.error(e);
-                            setError('Failed to load clients.');
-                          } finally {
-                            setClientsLoading(false);
-                          }
-                        }}
-                        className="w-full py-2.5 bg-white border border-primary-200 text-primary-700 font-medium rounded-lg hover:bg-primary-50 hover:border-primary-300 transition-colors shadow-sm flex justify-center items-center gap-2"
-                      >
-                        <UserPlus size={16} /> Save to Client
-                      </button>
-                    )
-                  )}
+
                 </div>
               )}
             </div>
@@ -1589,6 +1649,69 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     </h5>
                     <div className="text-xs text-slate-500 bg-slate-50 p-4 rounded-lg border border-slate-100 leading-relaxed">
                       {content.disclaimers}
+                    </div>
+                  </div>
+                )}
+
+                {/* Data Visualizations Section */}
+                {chartData && (
+                  <div className="mt-12 pt-8 border-t border-slate-100">
+                    <h5 className="text-lg font-display font-semibold text-slate-900 mb-6 flex items-center gap-2">
+                      <BarChart3 size={20} className="text-indigo-500" />
+                      Data Visualizations
+                    </h5>
+
+                    <div className="bg-white border text-slate-800 border-slate-200 rounded-xl p-6 shadow-sm">
+                      <h6 className="font-semibold text-slate-800 text-center mb-6">{chartData.title || 'Market Trends'}</h6>
+
+                      <div className="w-full h-[300px]">
+                        <ResponsiveContainer width="100%" height="100%">
+                          {chartData.type === 'line' ? (
+                            <LineChart data={chartData.data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} dy={10} />
+                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} />
+                              <Tooltip
+                                contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)' }}
+                              />
+                              <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                              <Line type="monotone" dataKey="value" stroke="#6366f1" strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} name={chartData.dataLabel || "Value"} />
+                              {chartData.dataKey2 && <Line type="monotone" dataKey="value2" stroke="#10b981" strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} name={chartData.dataLabel2 || "Value 2"} />}
+                            </LineChart>
+                          ) : chartData.type === 'pie' ? (
+                            <PieChart>
+                              <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
+                              <Legend />
+                              <Pie
+                                data={chartData.data}
+                                cx="50%"
+                                cy="50%"
+                                innerRadius={60}
+                                outerRadius={90}
+                                paddingAngle={5}
+                                dataKey="value"
+                              >
+                                {chartData.data.map((entry: any, index: number) => (
+                                  <Cell key={`cell-${index}`} fill={['#6366f1', '#8b5cf6', '#ec4899', '#10b981', '#f59e0b'][index % 5]} />
+                                ))}
+                              </Pie>
+                            </PieChart>
+                          ) : (
+                            <BarChart data={chartData.data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} dy={10} />
+                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} />
+                              <Tooltip
+                                cursor={{ fill: '#f8fafc' }}
+                                contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                              />
+                              <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                              <Bar dataKey="value" fill="#6366f1" radius={[4, 4, 0, 0]} name={chartData.dataLabel || "Value"} />
+                              {chartData.dataKey2 && <Bar dataKey="value2" fill="#10b981" radius={[4, 4, 0, 0]} name={chartData.dataLabel2 || "Value 2"} />}
+                            </BarChart>
+                          )}
+                        </ResponsiveContainer>
+                      </div>
                     </div>
                   </div>
                 )}
