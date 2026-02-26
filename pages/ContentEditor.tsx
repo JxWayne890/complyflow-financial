@@ -111,6 +111,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [showComplianceInput, setShowComplianceInput] = useState(false);
   const [complianceNote, setComplianceNote] = useState('');
   const editorRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLTextAreaElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const selectionRafRef = useRef<number | null>(null);
 
@@ -936,6 +937,14 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   }, [clearSelectionToolbar, showToolbar]);
 
+  // Auto-resize title textarea whenever title changes
+  useEffect(() => {
+    if (titleRef.current) {
+      titleRef.current.style.height = 'auto';
+      titleRef.current.style.height = titleRef.current.scrollHeight + 'px';
+    }
+  }, [content?.title]);
+
   useEffect(() => {
     if (!showToolbar || !selectionRange) return;
 
@@ -1535,6 +1544,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             <div className="flex-1 overflow-y-auto custom-scrollbar">
               <div className="max-w-3xl mx-auto py-12 px-8">
                 <textarea
+                  ref={titleRef}
                   className="w-full text-4xl font-display font-bold mb-8 border-none focus:ring-0 placeholder-slate-300 text-slate-900 p-0 resize-none overflow-hidden bg-transparent"
                   value={content.title}
                   onChange={(e) => {
