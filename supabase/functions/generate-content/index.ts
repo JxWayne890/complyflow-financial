@@ -41,12 +41,15 @@ const meritVideoStyle = `
 You are a financial advisor creating an educational YouTube video script.
 Tone: Conversational, reassuring, slightly informal but highly educational and trustworthy.
 Structure:
-1. Hook the viewer immediately by stating the problem or topic ("In today's video we're going to talk about...").
-2. Break the topic down into clear, numbered lessons, mistakes, or actionable truths.
-3. Use real-world analogies, examples, and simple math to explain concepts.
-4. Speak directly to the audience (e.g., "Imagine if you...", "You might be thinking...").
-5. Outro: End the script EXACTLY with a call to engagement and this specific phrase: "Thanks for watching and always remember you don't need more money, you need a better plan. Look forward to seeing you in the next video."
-Formatting: Output the script as spoken word paragraphs. You may use timecodes (e.g., 00:00) if helpful. Do not output markdown code blocks.
+1. **Title**: Start with a compelling, SEO-friendly video title on the first line.
+2. **Hook**: Hook the viewer immediately ("In today's video we're going to talk about...").
+3. **Lessons**: Break the topic down into clear, numbered lessons or mistakes.
+4. **Outro**: End the script exactly with: "Thanks for watching and always remember you don't need more money, you need a better plan. Look forward to seeing you in the next video."
+
+**MANDATORY FORMATTING**: 
+- Start every major section or paragraph with a timestamp in brackets like [00:00].
+- Use the format: [MM:SS] Followed by the spoken content.
+- Do not use markdown code blocks.
 `;
 
 const escapeHtml = (value: string) =>
@@ -495,6 +498,22 @@ IMPORTANT: Return ONLY the rewritten passage.
       const htmlBody = body.split("\n\n").map((block: string) => {
         const trimmed = block.trim();
         if (!trimmed) return "";
+
+        // Handle timestamps for Video Scripts: [MM:SS] or MM:SS
+        const timestampRegex = /^\[?(\d{1,2}:\d{2})\]?/;
+        const match = trimmed.match(timestampRegex);
+
+        if (match) {
+          const timestamp = match[1];
+          const content = trimmed.replace(timestampRegex, "").trim();
+          return `
+            <div style="margin-bottom: 24px; padding: 12px; background: #f8fafc; border-radius: 8px; border-left: 4px solid #2563eb;">
+              <div style="color: #2563eb; font-weight: 700; margin-bottom: 4px; font-size: 14px;">${timestamp}</div>
+              <p style="margin: 0; color: #334155; line-height: 1.6;">${content.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>
+            </div>
+          `;
+        }
+
         if (trimmed.startsWith("###")) return `<h3 style="margin-top: 32px; margin-bottom: 16px; font-weight: 700;">${trimmed.replace(/^###\s*/, "")}</h3>`;
         if (trimmed.startsWith("##")) return `<h2 style="margin-top: 40px; margin-bottom: 20px; font-weight: 700;">${trimmed.replace(/^##\s*/, "")}</h2>`;
         if (trimmed.startsWith("#")) return `<h1 style="margin-top: 48px; margin-bottom: 24px; font-weight: 800;">${trimmed.replace(/^#\s*/, "")}</h1>`;
