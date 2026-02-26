@@ -37,6 +37,18 @@ Style: Clean, bold font, high contrast, professional financial aesthetic.
 Output: Provide a detailed visual description or script. Do not output markdown code blocks unless it's a script.
 `;
 
+const meritVideoStyle = `
+You are a financial advisor creating an educational YouTube video script.
+Tone: Conversational, reassuring, slightly informal but highly educational and trustworthy.
+Structure:
+1. Hook the viewer immediately by stating the problem or topic ("In today's video we're going to talk about...").
+2. Break the topic down into clear, numbered lessons, mistakes, or actionable truths.
+3. Use real-world analogies, examples, and simple math to explain concepts.
+4. Speak directly to the audience (e.g., "Imagine if you...", "You might be thinking...").
+5. Outro: End the script EXACTLY with a call to engagement and this specific phrase: "Thanks for watching and always remember you don't need more money, you need a better plan. Look forward to seeing you in the next video."
+Formatting: Output the script as spoken word paragraphs. You may use timecodes (e.g., 00:00) if helpful. Do not output markdown code blocks.
+`;
+
 const escapeHtml = (value: string) =>
   value
     .replaceAll("&", "&amp;")
@@ -348,7 +360,10 @@ If the topic involves data, trends, asset allocation, or comparisons, you MUST a
 </script>
 If comparing two sets of metrics across categories, include dataKey2, dataLabel2, and value2. Otherwise, omit them. Do not put this script block inside markdown formatting. The type can be 'bar', 'line', or 'pie'.`;
 
-    if (
+    if (contentType && contentType.toLowerCase() === "video script") {
+      systemPrompt = meritVideoStyle;
+      userContent = `Create a YouTube video script about: ${topic}. \n\nTarget Length: ${lengthInstruction}\n\nContext/Instructions: ${instructions}`;
+    } else if (
       contentType &&
       (contentType.toLowerCase().includes("video") ||
         contentType.toLowerCase().includes("ad"))
