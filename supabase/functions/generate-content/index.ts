@@ -360,7 +360,7 @@ If the topic involves data, trends, asset allocation, or comparisons, you MUST a
 </script>
 If comparing two sets of metrics across categories, include dataKey2, dataLabel2, and value2. Otherwise, omit them. Do not put this script block inside markdown formatting. The type can be 'bar', 'line', or 'pie'.`;
 
-    if (contentType && contentType.toLowerCase() === "video script") {
+    if (contentType && (contentType.toLowerCase() === "video script" || contentType.toLowerCase() === "video_script")) {
       systemPrompt = meritVideoStyle;
       userContent = `Create a YouTube video script about: ${topic}. \n\nTarget Length: ${lengthInstruction}\n\nContext/Instructions: ${instructions}`;
     } else if (
