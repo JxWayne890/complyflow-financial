@@ -880,7 +880,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   }, [getSelectionRect]);
 
   const syncSelectionToolbar = useCallback(() => {
-    if (isRewriting) return;
+    if (isRewriting || isIframeSelection) return;
 
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.toString().trim()) {
@@ -910,7 +910,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     if (!showComplianceInput) {
       setComplianceNote('');
     }
-  }, [calculateToolbarPosition, clearSelectionToolbar, isRewriting, showComplianceInput]);
+  }, [calculateToolbarPosition, clearSelectionToolbar, isRewriting, showComplianceInput, isIframeSelection]);
 
   const queueSelectionSync = useCallback(() => {
     if (selectionRafRef.current !== null) {
@@ -1029,7 +1029,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     return () => window.removeEventListener('message', handleMessage);
   }, [clearSelectionToolbar, showComplianceInput]);
 
-  const getIframeSrcDoc = (html: string) => {
+  const iframeSrcDoc = React.useMemo(() => {
+    if (!content?.body) return '';
+    const html = content.body;
     const script = `
       <script>
         let st;
@@ -1038,7 +1040,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           st = setTimeout(() => {
             const sel = window.getSelection();
             if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !sel.toString().trim()) {
-              window.parent.postMessage({ type: 'iframe_selection_cleared' }, '*');
+              if (document.hasFocus()) {
+                window.parent.postMessage({ type: 'iframe_selection_cleared' }, '*');
+              }
               return;
             }
             const range = sel.getRangeAt(0);
@@ -1073,7 +1077,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     `;
     if (!html.includes('</body>')) return html + script;
     return html.replace('</body>', script + '</body>');
-  };
+  }, [content?.body]);
 
   // --- Select & Fix: Rewrite Handler ---
   const handleRewrite = async (mode: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance') => {
@@ -1749,7 +1753,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     </button>
                     <iframe
                       ref={iframeRef}
-                      srcDoc={getIframeSrcDoc(content.body)}
+                      srcDoc={iframeSrcDoc}
                       title="Blog Preview"
                       className="w-full h-full border-none bg-white"
                       sandbox="allow-scripts allow-same-origin"
