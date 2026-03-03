@@ -92,6 +92,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [savingImageIndex, setSavingImageIndex] = useState<number | null>(null);
   const [generatedTextOptions, setGeneratedTextOptions] = useState<any[]>([]);
   const [showTextSelection, setShowTextSelection] = useState(false);
+  const [showFullPreview, setShowFullPreview] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Save to Client state
@@ -1621,7 +1622,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   placeholder="Untitled Document"
                 />
                 {content.body.includes('<!DOCTYPE html>') ? (
-                  <div className="w-full relative border border-slate-200 rounded-xl overflow-hidden shadow-sm mt-4 bg-white" style={{ height: '800px' }}>
+                  <div className="w-full relative border border-slate-200 rounded-xl overflow-hidden shadow-sm mt-4 bg-white group" style={{ height: '800px' }}>
+                    <button
+                      onClick={() => setShowFullPreview(true)}
+                      className="absolute top-4 right-4 z-10 bg-slate-900/80 hover:bg-slate-900 text-white p-2 rounded-lg shadow-md backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-2"
+                    >
+                      <Maximize2 size={16} /> <span className="text-sm font-medium pr-1">Expand Preview</span>
+                    </button>
                     <iframe
                       srcDoc={content.body}
                       title="Blog Preview"
@@ -1971,6 +1978,32 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         )}
 
       </div>
+
+      {showFullPreview && content && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-xl shadow-2xl w-full h-full max-w-[1400px] max-h-[95vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-300">
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <h3 className="text-lg font-display font-semibold text-slate-900 flex items-center gap-2">
+                <Maximize2 size={18} className="text-primary-500" /> Fullscreen Preview
+              </h3>
+              <button
+                onClick={() => setShowFullPreview(false)}
+                className="p-2 hover:bg-slate-200 rounded-full text-slate-500 hover:text-slate-700 transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden bg-slate-100/50 p-2 md:p-6">
+              <iframe
+                srcDoc={content.body}
+                title="Fullscreen Preview"
+                className="w-full h-full border border-slate-200 shadow-sm rounded-lg bg-white"
+                sandbox="allow-scripts allow-same-origin"
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Client Picker Modal */}
       {showClientPicker && (
