@@ -20,13 +20,10 @@ import {
   PenTool,
   FileCheck,
   RefreshCw,
-  Minimize2,
   Maximize2,
-  ShieldCheck,
   Clipboard,
   X,
   Users,
-  ArrowLeft,
   BookOpen,
   ArrowRight,
   Search,
@@ -103,25 +100,28 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [isSavingToClient, setIsSavingToClient] = useState(false);
   const [savedClientName, setSavedClientName] = useState<string | null>(null);
 
-  // Select & Fix State
-  const [selectedText, setSelectedText] = useState('');
-  const [selectionRange, setSelectionRange] = useState<Range | null>(null);
-  const [toolbarPosition, setToolbarPosition] = useState<{ top: number; left: number } | null>(null);
-  const [showToolbar, setShowToolbar] = useState(false);
-  const [showComplianceInput, setShowComplianceInput] = useState(false);
-  const [complianceNote, setComplianceNote] = useState('');
-  const [iframeEditLoading, setIframeEditLoading] = useState(false);
+  // Iframe Select & Fix State
+  const [stableIframeSrcDoc, setStableIframeSrcDoc] = useState('');
+  const lastIframeBodyRef = useRef('');
   const editorRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
-  const toolbarRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const selectionRafRef = useRef<number | null>(null);
+  const fullscreenIframeRef = useRef<HTMLIFrameElement>(null);
 
   // Content State
   const [content, setContent] = useState<ContentVersion | null>(null);
   const [status, setStatus] = useState<ContentStatus>(ContentStatus.DRAFT);
   const [reviews, setReviews] = useState<ComplianceReview[]>([]);
   const [isLoadingRequest, setIsLoadingRequest] = useState(false);
+  const [showComplianceModal, setShowComplianceModal] = useState(false);
+  const [selectedReviewer, setSelectedReviewer] = useState<string | null>(null);
+
+  const complianceTeam = [
+    { id: '1', name: 'Sarah Jenkins', role: 'Senior Compliance Officer', avatar: 'SJ', email: 'sarah.j@complyflow.com' },
+    { id: '2', name: 'Michael Chen', role: 'Regulatory Associate', avatar: 'MC', email: 'm.chen@complyflow.com' },
+    { id: '3', name: 'Emma Williams', role: 'Compliance Director', avatar: 'EW', email: 'emma.w@complyflow.com' },
+    { id: '4', name: 'David Thompson', role: 'Compliance Lead', avatar: 'DT', email: 'd.thompson@complyflow.com' },
+  ];
   const [isSavingDraft, setIsSavingDraft] = useState(false);
 
   const loadRequestData = useCallback(async (requestIdToLoad: string) => {
@@ -806,11 +806,11 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const currentRequestId = await ensureRequestId();
 
       if (newStatus === ContentStatus.SUBMITTED) {
-        await saveCurrentEditorVersion(currentRequestId);
+        setShowComplianceModal(true);
+        return;
       }
 
-      const persistedStatus =
-        newStatus === ContentStatus.SUBMITTED ? ContentStatus.IN_REVIEW : newStatus;
+      const persistedStatus = newStatus;
 
       const { error: requestUpdateError } = await supabase
         .from('content_requests')
@@ -830,130 +830,40 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   };
 
-  const clearSelectionToolbar = useCallback((preserveComplianceInput = false) => {
-    if (preserveComplianceInput) return;
-    setShowToolbar(false);
-    setSelectedText('');
-    setSelectionRange(null);
-    setToolbarPosition(null);
-    setShowComplianceInput(false);
-    setComplianceNote('');
-  }, []);
+  const handleConfirmReviewSubmit = async () => {
+    if (!selectedReviewer) return;
 
-  const getSelectionRect = useCallback((range: Range) => {
-    const rect = range.getBoundingClientRect();
-    if (rect.width > 0 || rect.height > 0) {
-      return rect;
+    try {
+      setError(null);
+      setIsSavingDraft(true); // Reusing as a general loading state
+
+      const currentRequestId = await ensureRequestId();
+
+      // Save the latest content version before submitting
+      await saveCurrentEditorVersion(currentRequestId);
+
+      const persistedStatus = ContentStatus.IN_REVIEW;
+
+      const { error: requestUpdateError } = await supabase
+        .from('content_requests')
+        .update({
+          status: persistedStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', currentRequestId);
+
+      if (requestUpdateError) throw requestUpdateError;
+
+      setShowComplianceModal(false);
+      setStatus(persistedStatus);
+      navigate(`/content/${currentRequestId}`);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || 'Failed to submit for review.');
+    } finally {
+      setIsSavingDraft(false);
     }
-
-    const rects = range.getClientRects();
-    if (rects.length > 0) {
-      return rects[rects.length - 1] as DOMRect;
-    }
-
-    return null;
-  }, []);
-
-  const calculateToolbarPosition = useCallback((range: Range, complianceOpen: boolean) => {
-    const rect = getSelectionRect(range);
-    if (!rect) return null;
-
-    const estimatedWidth = complianceOpen ? 300 : 440;
-    const estimatedHeight = complianceOpen ? 56 : 44;
-    const viewportPadding = 8;
-
-    const centeredLeft = rect.left + (rect.width / 2) - (estimatedWidth / 2);
-    const maxLeft = window.innerWidth - estimatedWidth - viewportPadding;
-    const left = Math.max(viewportPadding, Math.min(centeredLeft, maxLeft));
-
-    let top = rect.top - estimatedHeight - 12;
-    if (top < viewportPadding) {
-      top = rect.bottom + 12;
-    }
-
-    return {
-      top: Math.max(viewportPadding, top),
-      left,
-    };
-  }, [getSelectionRect]);
-
-  const syncSelectionToolbar = useCallback(() => {
-    if (iframeEditLoading) return;
-
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.toString().trim()) {
-      clearSelectionToolbar(showComplianceInput);
-      return;
-    }
-
-    const range = selection.getRangeAt(0);
-    if (!editorRef.current?.contains(range.commonAncestorContainer)) {
-      clearSelectionToolbar(showComplianceInput);
-      return;
-    }
-
-    const text = selection.toString().trim();
-    const position = calculateToolbarPosition(range, showComplianceInput);
-
-    if (!position) {
-      clearSelectionToolbar(showComplianceInput);
-      return;
-    }
-
-    setSelectedText(text);
-    setSelectionRange(range.cloneRange());
-    setToolbarPosition(position);
-    setShowToolbar(true);
-
-    if (!showComplianceInput) {
-      setComplianceNote('');
-    }
-  }, [calculateToolbarPosition, clearSelectionToolbar, iframeEditLoading, showComplianceInput]);
-
-  const queueSelectionSync = useCallback(() => {
-    if (selectionRafRef.current !== null) {
-      cancelAnimationFrame(selectionRafRef.current);
-    }
-
-    selectionRafRef.current = requestAnimationFrame(() => {
-      selectionRafRef.current = null;
-      syncSelectionToolbar();
-    });
-  }, [syncSelectionToolbar]);
-
-  // --- Select & Fix: Selection Detection ---
-  const handleTextSelection = useCallback(() => {
-    queueSelectionSync();
-  }, [queueSelectionSync]);
-
-  useEffect(() => {
-    document.addEventListener('selectionchange', queueSelectionSync);
-    return () => {
-      document.removeEventListener('selectionchange', queueSelectionSync);
-      if (selectionRafRef.current !== null) {
-        cancelAnimationFrame(selectionRafRef.current);
-        selectionRafRef.current = null;
-      }
-    };
-  }, [queueSelectionSync]);
-
-  // Click outside to dismiss toolbar (only for non-iframe editor)
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (toolbarRef.current && !toolbarRef.current.contains(e.target as Node)) {
-        clearSelectionToolbar();
-      }
-    };
-    if (showToolbar) {
-      const timer = setTimeout(() => {
-        document.addEventListener('mousedown', handleClickOutside);
-      }, 100);
-      return () => {
-        clearTimeout(timer);
-        document.removeEventListener('mousedown', handleClickOutside);
-      };
-    }
-  }, [clearSelectionToolbar, showToolbar]);
+  };
 
   // Auto-resize title textarea whenever title changes
   useEffect(() => {
@@ -963,328 +873,577 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   }, [content?.title]);
 
+  const stripIframeEditorInjection = useCallback((html: string): string => {
+    if (!html) return '';
+    return html.replace(/<!-- CF_IFRAME_EDIT_BRIDGE_START -->[\s\S]*?<!-- CF_IFRAME_EDIT_BRIDGE_END -->/g, '');
+  }, []);
+
+  const injectIframeEditorBridge = useCallback((html: string): string => {
+    const cleanedHtml = stripIframeEditorInjection(html);
+    const bridgeBlock = `
+<!-- CF_IFRAME_EDIT_BRIDGE_START -->
+<style id="cf-iframe-edit-style">
+  .cf-pill {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 2147483646;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    border-radius: 999px;
+    background: #0f172a;
+    border: 1px solid #334155;
+    box-shadow: 0 10px 24px rgba(2, 6, 23, 0.35);
+    color: #e2e8f0;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+    user-select: none;
+  }
+  .cf-pill.cf-visible { display: inline-flex; }
+  .cf-pill button {
+    border: 0;
+    border-radius: 999px;
+    padding: 7px 12px;
+    background: transparent;
+    color: #e2e8f0;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 120ms ease;
+  }
+  .cf-pill button:hover { background: #334155; }
+  .cf-pill button:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+  .cf-pill .cf-divider {
+    width: 1px;
+    height: 20px;
+    background: #475569;
+  }
+  .cf-pill .cf-note {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    margin-left: 4px;
+  }
+  .cf-pill.cf-note-open .cf-note { display: inline-flex; }
+  .cf-pill.cf-note-open #cfComplianceToggle { display: none; }
+  .cf-pill .cf-note input {
+    width: 190px;
+    border: 1px solid #475569;
+    border-radius: 8px;
+    background: #1e293b;
+    color: #f8fafc;
+    padding: 6px 8px;
+    font-size: 12px;
+    outline: none;
+  }
+  .cf-pill .cf-note input:focus { border-color: #64748b; }
+</style>
+<div id="cfIframePill" class="cf-pill" role="toolbar" aria-label="Select and fix toolbar">
+  <button type="button" data-mode="rewrite">Rewrite</button>
+  <button type="button" data-mode="shorten">Shorten</button>
+  <button type="button" data-mode="expand">Expand</button>
+  <div class="cf-divider"></div>
+  <button type="button" id="cfComplianceToggle">Fix Compliance</button>
+  <form class="cf-note" id="cfComplianceForm">
+    <input type="text" id="cfComplianceInput" placeholder="Compliance note..." />
+    <button type="submit">Fix</button>
+  </form>
+</div>
+<!-- CF_IFRAME_EDIT_BRIDGE_END -->
+`.trim();
+
+    if (cleanedHtml.includes('</body>')) {
+      return cleanedHtml.replace('</body>', `${bridgeBlock}</body>`);
+    }
+
+    return `${cleanedHtml}${bridgeBlock}`;
+  }, [stripIframeEditorInjection]);
+
   useEffect(() => {
-    if (!showToolbar || !selectionRange) return;
+    if (!content?.body || !content.body.includes('<!DOCTYPE html>')) {
+      lastIframeBodyRef.current = '';
+      setStableIframeSrcDoc(prev => (prev ? '' : prev));
+      return;
+    }
 
-    const updatePosition = () => {
-      const position = calculateToolbarPosition(selectionRange, showComplianceInput);
-      if (position) {
-        setToolbarPosition(position);
-      }
-    };
+    const cleanedBody = stripIframeEditorInjection(content.body);
+    if (cleanedBody === lastIframeBodyRef.current) {
+      return;
+    }
 
-    window.addEventListener('resize', updatePosition);
-    document.addEventListener('scroll', updatePosition, true);
+    lastIframeBodyRef.current = cleanedBody;
+    const nextSrcDoc = injectIframeEditorBridge(cleanedBody);
+    setStableIframeSrcDoc(prev => (prev === nextSrcDoc ? prev : nextSrcDoc));
+  }, [content?.body, injectIframeEditorBridge, stripIframeEditorInjection]);
 
-    return () => {
-      window.removeEventListener('resize', updatePosition);
-      document.removeEventListener('scroll', updatePosition, true);
-    };
-  }, [calculateToolbarPosition, selectionRange, showComplianceInput, showToolbar]);
+  const latestContentRef = useRef<ContentVersion | null>(null);
+  const latestRequestIdRef = useRef<string | null>(null);
+  const rewriteContextRef = useRef({
+    topic: '',
+    contentType: '',
+    instructions: '',
+    textProvider: 'claude' as TextProvider,
+  });
 
-  // --- Iframe Inline Editing (v2) ---
-  // The toolbar lives INSIDE the iframe. No cross-frame selection issues.
-  const iframeSrcDoc = React.useMemo(() => {
-    if (!content?.body) return '';
-    const html = content.body;
-    const injected = `
-      <style>
-        .cf-edit-toolbar {
-          position: fixed;
-          z-index: 99999;
-          display: none;
-          background: #1e293b;
-          border-radius: 10px;
-          padding: 4px;
-          box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-          gap: 2px;
-          align-items: center;
-          animation: cf-fade-in 0.15s ease;
-        }
-        .cf-edit-toolbar.cf-visible { display: flex; }
-        @keyframes cf-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-        .cf-edit-toolbar button {
-          background: transparent;
-          border: none;
-          color: #e2e8f0;
-          padding: 6px 12px;
-          font-size: 12px;
-          font-weight: 600;
-          font-family: system-ui, -apple-system, sans-serif;
-          cursor: pointer;
-          border-radius: 6px;
-          white-space: nowrap;
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          transition: background 0.15s;
-        }
-        .cf-edit-toolbar button:hover { background: #334155; }
-        .cf-edit-toolbar button.cf-loading { opacity: 0.6; pointer-events: none; }
-        .cf-edit-toolbar .cf-divider { width: 1px; height: 20px; background: #475569; margin: 0 2px; }
-        .cf-edit-toolbar .cf-compliance-input {
-          display: flex; gap: 4px; align-items: center;
-        }
-        .cf-edit-toolbar .cf-compliance-input input {
-          background: #334155; border: 1px solid #475569; color: #e2e8f0;
-          padding: 4px 8px; border-radius: 6px; font-size: 12px; width: 160px;
-          outline: none;
-        }
-        .cf-edit-toolbar .cf-compliance-input input:focus { border-color: #6366f1; }
-        .cf-edit-toolbar .cf-compliance-input button { padding: 4px 10px; background: #6366f1; color: white; }
-        .cf-edit-toolbar .cf-compliance-input button:hover { background: #4f46e5; }
-        .new-content-highlight {
-          background: linear-gradient(120deg, rgba(99,102,241,0.15) 0%, rgba(139,92,246,0.15) 100%);
-          border-bottom: 2px solid #6366f1;
-          padding: 1px 0;
-          transition: background 2s ease, border-color 2s ease;
-        }
-      </style>
-      <div class="cf-edit-toolbar" id="cfToolbar">
-        <button onclick="doEdit('rewrite')">&#x21BB; Rewrite</button>
-        <button onclick="doEdit('shorten')">&#x2199; Shorten</button>
-        <button onclick="doEdit('expand')">&#x2197; Expand</button>
-        <div class="cf-divider"></div>
-        <button onclick="showCompliance()" id="cfComplianceBtn">&#x1F6E1; Fix Compliance</button>
-        <div class="cf-compliance-input" id="cfComplianceInput" style="display:none">
-          <input type="text" placeholder="Compliance note..." id="cfComplianceNote" />
-          <button onclick="doCompliance()">Fix</button>
-        </div>
-      </div>
-      <script>
-        (function() {
-          const toolbar = document.getElementById('cfToolbar');
-          const complianceBtn = document.getElementById('cfComplianceBtn');
-          const complianceInput = document.getElementById('cfComplianceInput');
-          const complianceNote = document.getElementById('cfComplianceNote');
-          let savedRange = null;
-          let isProcessing = false;
-
-          function positionToolbar() {
-            const sel = window.getSelection();
-            if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !sel.toString().trim()) {
-              toolbar.classList.remove('cf-visible');
-              complianceInput.style.display = 'none';
-              complianceBtn.style.display = '';
-              savedRange = null;
-              return;
-            }
-            if (isProcessing) return;
-            const range = sel.getRangeAt(0);
-            savedRange = range.cloneRange();
-            const rects = range.getClientRects();
-            if (rects.length === 0) return;
-            const rect = rects[rects.length - 1];
-            const tw = toolbar.offsetWidth || 340;
-            const th = toolbar.offsetHeight || 40;
-            let top = rect.top - th - 10;
-            if (top < 8) top = rect.bottom + 10;
-            let left = rect.left + (rect.width / 2) - (tw / 2);
-            left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
-            toolbar.style.top = top + 'px';
-            toolbar.style.left = left + 'px';
-            toolbar.classList.add('cf-visible');
-          }
-
-          document.addEventListener('selectionchange', () => {
-            if (!isProcessing) positionToolbar();
-          });
-
-          function setLoading(yes) {
-            isProcessing = yes;
-            toolbar.querySelectorAll('button').forEach(b => {
-              if (yes) b.classList.add('cf-loading');
-              else b.classList.remove('cf-loading');
-            });
-          }
-
-          window.doEdit = function(mode) {
-            const sel = window.getSelection();
-            if ((!sel || sel.isCollapsed) && !savedRange) return;
-            const text = sel && !sel.isCollapsed ? sel.toString().trim() : (savedRange ? savedRange.toString().trim() : '');
-            if (!text) return;
-            if (sel && !sel.isCollapsed) savedRange = sel.getRangeAt(0).cloneRange();
-            setLoading(true);
-            window.parent.postMessage({ type: 'iframe_edit_request', text: text, mode: mode }, '*');
-          };
-
-          window.showCompliance = function() {
-            complianceBtn.style.display = 'none';
-            complianceInput.style.display = 'flex';
-            complianceNote.focus();
-          };
-
-          window.doCompliance = function() {
-            const note = complianceNote.value.trim();
-            if (!note) return;
-            const sel = window.getSelection();
-            const text = sel && !sel.isCollapsed ? sel.toString().trim() : (savedRange ? savedRange.toString().trim() : '');
-            if (!text) return;
-            if (sel && !sel.isCollapsed) savedRange = sel.getRangeAt(0).cloneRange();
-            setLoading(true);
-            window.parent.postMessage({ type: 'iframe_edit_request', text: text, mode: 'fix_compliance', complianceNote: note }, '*');
-          };
-
-          complianceNote.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') { e.preventDefault(); window.doCompliance(); }
-          });
-
-          window.addEventListener('message', function(e) {
-            if (e.data.type === 'iframe_edit_result') {
-              if (savedRange) {
-                const sel = window.getSelection();
-                sel.removeAllRanges();
-                sel.addRange(savedRange);
-                const r = sel.getRangeAt(0);
-                const span = document.createElement('span');
-                span.className = 'new-content-highlight';
-                span.textContent = e.data.text;
-                r.deleteContents();
-                r.insertNode(span);
-                sel.removeAllRanges();
-                savedRange = null;
-                setTimeout(() => {
-                  if (span.parentNode) {
-                    const t = document.createTextNode(span.textContent);
-                    span.parentNode.replaceChild(t, span);
-                  }
-                }, 4000);
-              }
-              setLoading(false);
-              toolbar.classList.remove('cf-visible');
-              complianceInput.style.display = 'none';
-              complianceBtn.style.display = '';
-              complianceNote.value = '';
-              // Send updated HTML back to parent for saving
-              window.parent.postMessage({ type: 'iframe_html_updated', html: '<!DOCTYPE html>' + document.documentElement.outerHTML }, '*');
-            }
-          });
-        })();
-      </script>
-    `;
-    if (!html.includes('</body>')) return html + injected;
-    return html.replace('</body>', injected + '</body>');
-  }, [content?.body]);
-
-  // --- Parent-side listener for iframe edit requests ---
   useEffect(() => {
-    const handleMessage = async (event: MessageEvent) => {
-      if (event.data.type === 'iframe_edit_request' && content && requestId) {
-        setIframeEditLoading(true);
-        try {
-          const response: any = await triggerContentGeneration({
-            topic,
-            contentType,
-            instructions,
-            provider: textProvider,
-            action: 'rewrite',
-            currentContent: event.data.text,
-            rewriteMode: event.data.mode,
-            complianceNote: event.data.complianceNote || undefined,
-          });
-
-          if (response.data) {
-            let rewrittenText = response.data.body || response.data.title || '';
-            rewrittenText = rewrittenText.replace(/<p[^>]*>/g, '').replace(/<\/p>/g, '').trim();
-            iframeRef.current?.contentWindow?.postMessage({ type: 'iframe_edit_result', text: rewrittenText }, '*');
-          }
-        } catch (e: any) {
-          console.error(e);
-          setError(e.message || 'Failed to rewrite selection.');
-          iframeRef.current?.contentWindow?.postMessage({ type: 'iframe_edit_result', text: event.data.text }, '*');
-        } finally {
-          setIframeEditLoading(false);
-        }
-      } else if (event.data.type === 'iframe_html_updated' && content && requestId) {
-        try {
-          const cleanHtml = event.data.html
-            .replace(/class="new-content-highlight"/g, '')
-            .replace(/<div class="cf-edit-toolbar[\s\S]*?<\/div>/g, '')
-            .replace(/<style>[\s\S]*?\.cf-edit-toolbar[\s\S]*?<\/style>/g, '')
-            .replace(/<script>[\s\S]*?cfToolbar[\s\S]*?<\/script>/g, '');
-
-          const savedVersion = await createContentVersion(requestId, {
-            generated_by: 'ai',
-            title: content.title,
-            body: cleanHtml,
-            disclaimers: content.disclaimers,
-          });
-          setContent(savedVersion);
-        } catch (e: any) {
-          console.error('Failed to save iframe edit:', e);
-        }
-      }
+    latestContentRef.current = content;
+    latestRequestIdRef.current = requestId;
+    rewriteContextRef.current = {
+      topic,
+      contentType,
+      instructions,
+      textProvider,
     };
-
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
   }, [content, requestId, topic, contentType, instructions, textProvider]);
 
-  // --- Select & Fix: Rewrite Handler (non-iframe editor only) ---
-  const handleRewrite = async (mode: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance') => {
-    if (!selectedText || !selectionRange || !content || !requestId) return;
+  const normalizeRewriteText = useCallback((input: string): string => {
+    if (!input) return '';
+    const doc = new DOMParser().parseFromString(input, 'text/html');
+    const parsedText = doc.body.textContent?.replace(/\s+/g, ' ').trim() || '';
+    return parsedText;
+  }, []);
 
-    setIframeEditLoading(true);
-    setError(null);
+  const mainIframeRuntimeCleanupRef = useRef<(() => void) | null>(null);
+  const fullscreenIframeRuntimeCleanupRef = useRef<(() => void) | null>(null);
+  const pendingScrollRestoreRef = useRef<{
+    main: { x: number; y: number } | null;
+    fullscreen: { x: number; y: number } | null;
+  }>({
+    main: null,
+    fullscreen: null,
+  });
+  const pendingSelectionRestoreRef = useRef<{
+    main: { start: number; end: number } | null;
+    fullscreen: { start: number; end: number } | null;
+  }>({
+    main: null,
+    fullscreen: null,
+  });
 
-    try {
-      const response: any = await triggerContentGeneration({
-        topic,
-        contentType,
-        instructions,
-        provider: textProvider,
-        action: 'rewrite',
-        currentContent: selectedText,
-        rewriteMode: mode,
-        complianceNote: mode === 'fix_compliance' ? complianceNote : undefined,
+  const bindIframeRuntime = useCallback((
+    frame: HTMLIFrameElement,
+    cleanupRef: React.MutableRefObject<(() => void) | null>,
+    runtimeKey: 'main' | 'fullscreen'
+  ) => {
+    const frameWindow = frame.contentWindow;
+    const frameDocument = frame.contentDocument;
+    if (!frameWindow || !frameDocument) return;
+
+    if (cleanupRef.current) {
+      cleanupRef.current();
+      cleanupRef.current = null;
+    }
+
+    const pill = frameDocument.getElementById('cfIframePill') as HTMLDivElement | null;
+    if (!pill) return;
+
+    const complianceToggle = frameDocument.getElementById('cfComplianceToggle') as HTMLButtonElement | null;
+    const complianceForm = frameDocument.getElementById('cfComplianceForm') as HTMLFormElement | null;
+    const complianceInput = frameDocument.getElementById('cfComplianceInput') as HTMLInputElement | null;
+    const actionButtons = Array.from(pill.querySelectorAll<HTMLButtonElement>('button[data-mode]'));
+
+    let savedRange: Range | null = null;
+    let selectedText = '';
+    let isBusy = false;
+    let selectionRafId: number | null = null;
+    const timeoutIds: number[] = [];
+    const unbindFns: Array<() => void> = [];
+
+    const addEvent = (
+      target: Document | Window | HTMLElement,
+      event: string,
+      handler: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions
+    ) => {
+      target.addEventListener(event, handler, options);
+      unbindFns.push(() => target.removeEventListener(event, handler, options));
+    };
+
+    const hidePill = (force = false) => {
+      if (isBusy && !force) return;
+      pill.classList.remove('cf-visible', 'cf-note-open');
+      if (complianceInput) {
+        complianceInput.value = '';
+      }
+      savedRange = null;
+      selectedText = '';
+    };
+
+    const setBusyState = (nextBusy: boolean) => {
+      isBusy = nextBusy;
+      const buttons = pill.querySelectorAll<HTMLButtonElement>('button');
+      buttons.forEach(button => {
+        button.disabled = nextBusy;
+      });
+      if (complianceInput) {
+        complianceInput.disabled = nextBusy;
+      }
+    };
+
+    const getRangeRect = (range: Range) => {
+      const directRect = range.getBoundingClientRect();
+      if (directRect.width > 0 || directRect.height > 0) {
+        return directRect;
+      }
+      const rects = range.getClientRects();
+      if (!rects.length) return null;
+      return rects[rects.length - 1] as DOMRect;
+    };
+
+    const positionPill = (range: Range) => {
+      const rect = getRangeRect(range);
+      if (!rect) return;
+
+      const pillWidth = Math.max(pill.offsetWidth || 0, 360);
+      const pillHeight = Math.max(pill.offsetHeight || 0, 42);
+      const pad = 8;
+      let top = rect.top - pillHeight - 12;
+      if (top < pad) top = rect.bottom + 12;
+      let left = rect.left + (rect.width / 2) - (pillWidth / 2);
+      left = Math.max(pad, Math.min(left, frameWindow.innerWidth - pillWidth - pad));
+
+      pill.style.top = `${top}px`;
+      pill.style.left = `${left}px`;
+      pill.classList.add('cf-visible');
+    };
+
+    const getTextOffset = (container: Node, targetNode: Text, localOffset: number): number | null => {
+      const walker = frameDocument.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      let count = 0;
+      let current = walker.nextNode() as Text | null;
+      while (current) {
+        if (current === targetNode) {
+          return count + Math.max(0, Math.min(localOffset, current.textContent?.length || 0));
+        }
+        count += current.textContent?.length || 0;
+        current = walker.nextNode() as Text | null;
+      }
+      return null;
+    };
+
+    const resolveTextPosition = (container: Node, absoluteOffset: number): { node: Text; offset: number } | null => {
+      const clampedOffset = Math.max(0, absoluteOffset);
+      const walker = frameDocument.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      let traversed = 0;
+      let current = walker.nextNode() as Text | null;
+      let lastTextNode: Text | null = null;
+
+      while (current) {
+        lastTextNode = current;
+        const length = current.textContent?.length || 0;
+        if (traversed + length >= clampedOffset) {
+          return {
+            node: current,
+            offset: Math.max(0, Math.min(clampedOffset - traversed, length)),
+          };
+        }
+        traversed += length;
+        current = walker.nextNode() as Text | null;
+      }
+
+      if (!lastTextNode) return null;
+      return {
+        node: lastTextNode,
+        offset: lastTextNode.textContent?.length || 0,
+      };
+    };
+
+    const restorePendingSelection = () => {
+      const pendingSelection = pendingSelectionRestoreRef.current[runtimeKey];
+      if (!pendingSelection) return;
+
+      const selection = frameWindow.getSelection();
+      if (!selection) return;
+
+      const root = frameDocument.body || frameDocument.documentElement;
+      const startPos = resolveTextPosition(root, pendingSelection.start);
+      const endPos = resolveTextPosition(root, pendingSelection.end);
+      if (!startPos || !endPos) return;
+
+      const range = frameDocument.createRange();
+      range.setStart(startPos.node, startPos.offset);
+      range.setEnd(endPos.node, endPos.offset);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      pendingSelectionRestoreRef.current[runtimeKey] = null;
+    };
+
+    const replaceSavedRange = (replacementText: string): Text | null => {
+      if (!savedRange) return null;
+      const selection = frameWindow.getSelection();
+      if (!selection) return null;
+
+      selection.removeAllRanges();
+      selection.addRange(savedRange);
+      const activeRange = selection.getRangeAt(0);
+      activeRange.deleteContents();
+
+      const insertedTextNode = frameDocument.createTextNode(replacementText);
+      activeRange.insertNode(insertedTextNode);
+
+      const highlightRange = frameDocument.createRange();
+      highlightRange.setStart(insertedTextNode, 0);
+      highlightRange.setEnd(insertedTextNode, replacementText.length);
+      selection.removeAllRanges();
+      selection.addRange(highlightRange);
+
+      savedRange = null;
+      selectedText = '';
+      return insertedTextNode;
+    };
+
+    const saveIframeHtml = async () => {
+      const currentRequestId = latestRequestIdRef.current;
+      const currentContent = latestContentRef.current;
+      if (!currentRequestId || !currentContent) return;
+
+      const updatedRawHtml = `<!DOCTYPE html>\n${frameDocument.documentElement.outerHTML}`;
+      const cleanedHtml = stripIframeEditorInjection(updatedRawHtml);
+      const currentBody = stripIframeEditorInjection(currentContent.body || '');
+      if (!cleanedHtml || cleanedHtml === currentBody) return;
+
+      const savedVersion = await createContentVersion(currentRequestId, {
+        generated_by: 'human',
+        title: currentContent.title,
+        body: cleanedHtml,
+        disclaimers: currentContent.disclaimers,
       });
 
-      if (response.data) {
-        let rewrittenText = response.data.body || response.data.title || '';
-        rewrittenText = rewrittenText.replace(/<p[^>]*>/g, '').replace(/<\/p>/g, '').trim();
+      const scrollingElement = frameDocument.scrollingElement || frameDocument.documentElement || frameDocument.body;
+      pendingScrollRestoreRef.current[runtimeKey] = {
+        x: frameWindow.scrollX ?? scrollingElement.scrollLeft ?? 0,
+        y: frameWindow.scrollY ?? scrollingElement.scrollTop ?? 0,
+      };
+      setContent(savedVersion);
+    };
 
-        const highlightSpan = document.createElement('span');
-        highlightSpan.className = 'new-content-highlight';
-        highlightSpan.textContent = rewrittenText;
+    const runRewrite = async (mode: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance', complianceNote?: string) => {
+      if (isBusy || !savedRange || !selectedText) return;
 
-        selectionRange.deleteContents();
-        selectionRange.insertNode(highlightSpan);
+      const fallbackText = selectedText;
+      setBusyState(true);
+      try {
+        const rewriteContext = rewriteContextRef.current;
+        const response: any = await triggerContentGeneration({
+          topic: rewriteContext.topic,
+          contentType: rewriteContext.contentType,
+          instructions: rewriteContext.instructions,
+          provider: rewriteContext.textProvider,
+          action: 'rewrite',
+          currentContent: fallbackText,
+          rewriteMode: mode,
+          complianceNote: complianceNote || undefined,
+        });
 
-        if (editorRef.current) {
-          const newBody = editorRef.current.innerHTML;
-          const savedVersion = await createContentVersion(requestId, {
-            generated_by: 'ai',
-            title: content.title,
-            body: newBody.replace(/class="new-content-highlight"/g, ''),
-            disclaimers: content.disclaimers,
-          });
-          setContent({ ...savedVersion, body: newBody });
+        const rawRewrite = response?.data?.body || response?.data?.title || fallbackText;
+        const rewrittenText = normalizeRewriteText(rawRewrite) || fallbackText;
+        const insertedTextNode = replaceSavedRange(rewrittenText);
+        hidePill(true);
+        if (!insertedTextNode) return;
+
+        const root = frameDocument.body || frameDocument.documentElement;
+        const start = getTextOffset(root, insertedTextNode, 0);
+        const end = getTextOffset(root, insertedTextNode, rewrittenText.length);
+        if (start !== null && end !== null) {
+          pendingSelectionRestoreRef.current[runtimeKey] = { start, end };
         }
 
-        setTimeout(() => {
-          if (highlightSpan.parentNode) {
-            const textNode = document.createTextNode(highlightSpan.textContent || '');
-            highlightSpan.parentNode.replaceChild(textNode, highlightSpan);
-          }
-          setContent(prev => {
-            if (!prev) return null;
-            return { ...prev, body: prev.body.replace(/class="new-content-highlight"/g, '') };
-          });
-        }, 4500);
+        await saveIframeHtml();
+      } catch (e: any) {
+        console.error(e);
+        setError(e.message || 'Failed to rewrite selection.');
+      } finally {
+        setBusyState(false);
       }
-    } catch (e: any) {
-      console.error(e);
-      setError(e.message || 'Failed to rewrite selection.');
-    } finally {
-      setIframeEditLoading(false);
-      setShowToolbar(false);
-      setShowComplianceInput(false);
-      setComplianceNote('');
-      setSelectedText('');
-      setSelectionRange(null);
-      setToolbarPosition(null);
+    };
+
+    const captureSelection = () => {
+      if (isBusy) return;
+      const activeElement = frameDocument.activeElement;
+      if (activeElement && pill.contains(activeElement)) return;
+
+      const selection = frameWindow.getSelection();
+      if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+        hidePill();
+        return;
+      }
+
+      const text = selection.toString().trim();
+      if (!text) {
+        hidePill();
+        return;
+      }
+
+      const range = selection.getRangeAt(0);
+      const ancestor = range.commonAncestorContainer;
+      if (ancestor && pill.contains(ancestor.nodeType === Node.ELEMENT_NODE ? ancestor as Node : (ancestor.parentElement as Node))) {
+        return;
+      }
+
+      selectedText = text;
+      savedRange = range.cloneRange();
+      positionPill(savedRange);
+    };
+
+    const scheduleCaptureSelection = () => {
+      if (selectionRafId !== null) {
+        frameWindow.cancelAnimationFrame(selectionRafId);
+      }
+      selectionRafId = frameWindow.requestAnimationFrame(() => {
+        selectionRafId = null;
+        captureSelection();
+      });
+    };
+
+    actionButtons.forEach(button => {
+      addEvent(button, 'click', (event: Event) => {
+        event.preventDefault();
+        const mode = button.getAttribute('data-mode');
+        if (!mode) return;
+        void runRewrite(mode as 'rewrite' | 'shorten' | 'expand');
+      });
+    });
+
+    if (complianceToggle) {
+      addEvent(complianceToggle, 'click', (event: Event) => {
+        event.preventDefault();
+        pill.classList.add('cf-note-open');
+        complianceInput?.focus();
+      });
     }
-  };
+
+    if (complianceForm) {
+      addEvent(complianceForm, 'submit', (event: Event) => {
+        event.preventDefault();
+        const note = complianceInput?.value?.trim() || '';
+        if (!note) return;
+        void runRewrite('fix_compliance', note);
+      });
+    }
+
+    addEvent(pill, 'mousedown', (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (target.tagName !== 'INPUT') {
+        event.preventDefault();
+      }
+    });
+
+    addEvent(frameDocument, 'selectionchange', scheduleCaptureSelection);
+    addEvent(frameDocument, 'mouseup', scheduleCaptureSelection);
+    addEvent(frameDocument, 'pointerup', scheduleCaptureSelection);
+    const touchOptions: AddEventListenerOptions = { passive: true };
+    addEvent(frameDocument, 'touchend', scheduleCaptureSelection, touchOptions);
+    addEvent(frameDocument, 'keyup', (event: Event) => {
+      const keyEvent = event as KeyboardEvent;
+      if (keyEvent.key === 'Shift' || keyEvent.key.startsWith('Arrow') || keyEvent.key === 'a') {
+        scheduleCaptureSelection();
+      }
+    });
+    addEvent(frameDocument, 'focusin', scheduleCaptureSelection);
+    addEvent(frameDocument, 'visibilitychange', () => {
+      if (!frameDocument.hidden) {
+        scheduleCaptureSelection();
+      }
+    });
+    addEvent(frameWindow, 'resize', () => {
+      if (savedRange && pill.classList.contains('cf-visible')) {
+        positionPill(savedRange);
+      }
+    });
+    addEvent(frameWindow, 'scroll', () => {
+      if (savedRange && pill.classList.contains('cf-visible')) {
+        positionPill(savedRange);
+      }
+    }, true);
+
+    timeoutIds.push(frameWindow.setTimeout(scheduleCaptureSelection, 0));
+    timeoutIds.push(frameWindow.setTimeout(scheduleCaptureSelection, 80));
+
+    const pendingScroll = pendingScrollRestoreRef.current[runtimeKey];
+    if (pendingScroll) {
+      const applyPendingScroll = () => {
+        frameWindow.scrollTo(pendingScroll.x, pendingScroll.y);
+      };
+      const applyPendingSelection = () => {
+        restorePendingSelection();
+      };
+
+      frameWindow.requestAnimationFrame(() => {
+        applyPendingScroll();
+        frameWindow.requestAnimationFrame(() => {
+          applyPendingScroll();
+          applyPendingSelection();
+        });
+      });
+      [80, 160, 320, 640].forEach(delay => {
+        timeoutIds.push(frameWindow.setTimeout(applyPendingScroll, delay));
+      });
+      [160, 360, 680].forEach(delay => {
+        timeoutIds.push(frameWindow.setTimeout(applyPendingSelection, delay));
+      });
+      pendingScrollRestoreRef.current[runtimeKey] = null;
+    } else {
+      const applyPendingSelection = () => {
+        restorePendingSelection();
+      };
+      frameWindow.requestAnimationFrame(applyPendingSelection);
+      timeoutIds.push(frameWindow.setTimeout(applyPendingSelection, 80));
+    }
+
+    cleanupRef.current = () => {
+      if (selectionRafId !== null) {
+        frameWindow.cancelAnimationFrame(selectionRafId);
+        selectionRafId = null;
+      }
+      timeoutIds.forEach(id => frameWindow.clearTimeout(id));
+      unbindFns.forEach(unbind => unbind());
+      hidePill(true);
+    };
+  }, [createContentVersion, normalizeRewriteText, stripIframeEditorInjection]);
+
+  const handleMainIframeLoad = useCallback(() => {
+    const frame = iframeRef.current;
+    if (!frame) return;
+    bindIframeRuntime(frame, mainIframeRuntimeCleanupRef, 'main');
+  }, [bindIframeRuntime]);
+
+  const handleFullscreenIframeLoad = useCallback(() => {
+    const frame = fullscreenIframeRef.current;
+    if (!frame) return;
+    bindIframeRuntime(frame, fullscreenIframeRuntimeCleanupRef, 'fullscreen');
+  }, [bindIframeRuntime]);
+
+  useEffect(() => {
+    return () => {
+      if (mainIframeRuntimeCleanupRef.current) {
+        mainIframeRuntimeCleanupRef.current();
+        mainIframeRuntimeCleanupRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!showFullPreview) {
+      if (fullscreenIframeRuntimeCleanupRef.current) {
+        fullscreenIframeRuntimeCleanupRef.current();
+        fullscreenIframeRuntimeCleanupRef.current = null;
+      }
+      return;
+    }
+
+    return () => {
+      if (fullscreenIframeRuntimeCleanupRef.current) {
+        fullscreenIframeRuntimeCleanupRef.current();
+        fullscreenIframeRuntimeCleanupRef.current = null;
+      }
+    };
+  }, [showFullPreview]);
 
   const handlePublishToPortal = async () => {
     // In a real app, this would open a modal to select clients
@@ -1849,7 +2008,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     </button>
                     <iframe
                       ref={iframeRef}
-                      srcDoc={iframeSrcDoc}
+                      srcDoc={stableIframeSrcDoc}
+                      onLoad={handleMainIframeLoad}
                       title="Blog Preview"
                       className="w-full h-full border-none bg-white"
                       sandbox="allow-scripts allow-same-origin"
@@ -1863,9 +2023,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     suppressContentEditableWarning
                     dangerouslySetInnerHTML={{ __html: content.body }}
                     onBlur={(e) => setContent({ ...content, body: e.currentTarget.innerHTML })}
-                    onMouseUp={handleTextSelection}
-                    onKeyUp={handleTextSelection}
-                    onTouchEnd={handleTextSelection}
                   />
                 )}
 
@@ -1894,58 +2051,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                         </>
                       )}
                     </button>
-                  </div>
-                )}
-
-                {/* Floating Selection Toolbar */}
-                {showToolbar && toolbarPosition && (
-                  <div
-                    ref={toolbarRef}
-                    className="selection-toolbar"
-                    style={{ top: toolbarPosition.top, left: Math.max(0, toolbarPosition.left) }}
-                    onMouseDown={(e) => {
-                      const target = e.target as HTMLElement;
-                      if (target.tagName !== 'INPUT') {
-                        e.preventDefault();
-                      }
-                    }}
-                  >
-                    {iframeEditLoading ? (
-                      <div className="flex items-center gap-2 px-3 py-1">
-                        <Loader2 size={14} className="animate-spin text-primary-500" />
-                        <span className="text-xs text-slate-500 font-medium">Rewriting...</span>
-                      </div>
-                    ) : showComplianceInput ? (
-                      <div className="compliance-input-wrapper">
-                        <input
-                          type="text"
-                          placeholder="Compliance note..."
-                          value={complianceNote}
-                          onChange={(e) => setComplianceNote(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' && complianceNote.trim()) handleRewrite('fix_compliance'); }}
-                          autoFocus
-                        />
-                        <button onClick={() => complianceNote.trim() && handleRewrite('fix_compliance')}>
-                          Fix
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <button onClick={() => handleRewrite('rewrite')}>
-                          <RefreshCw size={13} /> Rewrite
-                        </button>
-                        <button onClick={() => handleRewrite('shorten')}>
-                          <Minimize2 size={13} /> Shorten
-                        </button>
-                        <button onClick={() => handleRewrite('expand')}>
-                          <Maximize2 size={13} /> Expand
-                        </button>
-                        <div className="divider" />
-                        <button onClick={() => setShowComplianceInput(true)}>
-                          <ShieldCheck size={13} className="text-amber-500" /> Fix Compliance
-                        </button>
-                      </>
-                    )}
                   </div>
                 )}
 
@@ -2214,7 +2319,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             </div>
             <div className="flex-1 overflow-hidden bg-slate-100/50 p-2 md:p-6">
               <iframe
-                srcDoc={content.body}
+                ref={fullscreenIframeRef}
+                srcDoc={stableIframeSrcDoc}
+                onLoad={handleFullscreenIframeLoad}
                 title="Fullscreen Preview"
                 className="w-full h-full border border-slate-200 shadow-sm rounded-lg bg-white"
                 sandbox="allow-scripts allow-same-origin"
@@ -2338,6 +2445,77 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   </div>
                 );
               })()}
+            </div>
+          </div>
+        </div>
+      )}
+      {showComplianceModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity"
+            onClick={() => setShowComplianceModal(false)}
+          />
+          <div className="relative bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in duration-200">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+              <div>
+                <h3 className="text-lg font-semibold text-slate-800">Submit for Review</h3>
+                <p className="text-xs text-slate-500">Select a compliance team member</p>
+              </div>
+              <button
+                onClick={() => setShowComplianceModal(false)}
+                className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-4 max-h-[60vh] overflow-y-auto">
+              <div className="space-y-2">
+                {complianceTeam.map((member) => (
+                  <button
+                    key={member.id}
+                    onClick={() => setSelectedReviewer(member.id)}
+                    className={`w-full flex items-center gap-4 p-4 rounded-xl border transition-all ${selectedReviewer === member.id
+                        ? 'border-primary-500 bg-primary-50/50 ring-2 ring-primary-500/10'
+                        : 'border-slate-100 hover:border-slate-200 hover:bg-slate-50'
+                      }`}
+                  >
+                    <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white font-bold shadow-sm ${['bg-blue-500', 'bg-emerald-500', 'bg-violet-500', 'bg-amber-500'][parseInt(member.id) - 1]
+                      }`}>
+                      {member.avatar}
+                    </div>
+                    <div className="flex-1 text-left">
+                      <p className="font-semibold text-slate-800 leading-none mb-1">{member.name}</p>
+                      <p className="text-xs text-slate-500">{member.role}</p>
+                    </div>
+                    {selectedReviewer === member.id && (
+                      <div className="w-6 h-6 rounded-full bg-primary-500 flex items-center justify-center text-white">
+                        <Check size={14} strokeWidth={3} />
+                      </div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 bg-slate-50/50 border-t border-slate-100 flex items-center gap-3">
+              <button
+                onClick={() => setShowComplianceModal(false)}
+                className="flex-1 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmReviewSubmit}
+                disabled={!selectedReviewer || isSavingDraft}
+                className="flex-[2] px-4 py-2.5 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-xl shadow-lg shadow-primary-500/25 transition-all flex items-center justify-center gap-2"
+              >
+                {isSavingDraft ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+                Send for Review
+              </button>
             </div>
           </div>
         </div>
