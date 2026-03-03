@@ -112,6 +112,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [showComplianceInput, setShowComplianceInput] = useState(false);
   const [complianceNote, setComplianceNote] = useState('');
   const [isIframeSelection, setIsIframeSelection] = useState(false);
+  const isIframeSelectionRef = useRef(false);
   const editorRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -840,6 +841,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     setShowComplianceInput(false);
     setComplianceNote('');
     setIsIframeSelection(false);
+    isIframeSelectionRef.current = false;
   }, []);
 
   const getSelectionRect = useCallback((range: Range) => {
@@ -880,17 +882,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   }, [getSelectionRect]);
 
   const syncSelectionToolbar = useCallback(() => {
-    if (isRewriting || isIframeSelection) return;
+    if (isRewriting || isIframeSelectionRef.current) return;
 
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.toString().trim()) {
-      clearSelectionToolbar(showComplianceInput);
+      if (!isIframeSelectionRef.current) {
+        clearSelectionToolbar(showComplianceInput);
+      }
       return;
     }
 
     const range = selection.getRangeAt(0);
     if (!editorRef.current?.contains(range.commonAncestorContainer)) {
-      clearSelectionToolbar(showComplianceInput);
+      if (!isIframeSelectionRef.current) {
+        clearSelectionToolbar(showComplianceInput);
+      }
       return;
     }
 
@@ -910,7 +916,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     if (!showComplianceInput) {
       setComplianceNote('');
     }
-  }, [calculateToolbarPosition, clearSelectionToolbar, isRewriting, showComplianceInput, isIframeSelection]);
+  }, [calculateToolbarPosition, clearSelectionToolbar, isRewriting, showComplianceInput]);
 
   const queueSelectionSync = useCallback(() => {
     if (selectionRafRef.current !== null) {
@@ -943,6 +949,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (toolbarRef.current && !toolbarRef.current.contains(e.target as Node)) {
+        // Don't dismiss if clicking inside the iframe
+        if (iframeRef.current && (iframeRef.current === e.target || iframeRef.current.contains(e.target as Node))) {
+          return;
+        }
         clearSelectionToolbar();
       }
     };
@@ -950,7 +960,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       // Slight delay to avoid immediate dismissal
       const timer = setTimeout(() => {
         document.addEventListener('mousedown', handleClickOutside);
-      }, 100);
+      }, 150);
       return () => {
         clearTimeout(timer);
         document.removeEventListener('mousedown', handleClickOutside);
@@ -991,6 +1001,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       if (event.data.type === 'iframe_selection_cleared') {
         clearSelectionToolbar(showComplianceInput);
         setIsIframeSelection(false);
+        isIframeSelectionRef.current = false;
       } else if (event.data.type === 'iframe_selection_made') {
         const iframe = iframeRef.current;
         if (!iframe) return;
@@ -1016,6 +1027,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
         setSelectedText(event.data.text);
         setIsIframeSelection(true);
+        isIframeSelectionRef.current = true;
         setToolbarPosition({ top: Math.max(viewportPadding, top), left });
         setShowToolbar(true);
 
@@ -1055,7 +1067,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                 rect: { top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height }
               }, '*');
             }
-          }, 100);
+          }, 200);
         });
 
         window.addEventListener('message', (e) => {
@@ -1187,6 +1199,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       setSelectionRange(null);
       setToolbarPosition(null);
       setIsIframeSelection(false);
+      isIframeSelectionRef.current = false;
     }
   };
 
