@@ -108,11 +108,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [selectionRange, setSelectionRange] = useState<Range | null>(null);
   const [toolbarPosition, setToolbarPosition] = useState<{ top: number; left: number } | null>(null);
   const [showToolbar, setShowToolbar] = useState(false);
-  const [isRewriting, setIsRewriting] = useState(false);
   const [showComplianceInput, setShowComplianceInput] = useState(false);
   const [complianceNote, setComplianceNote] = useState('');
-  const [isIframeSelection, setIsIframeSelection] = useState(false);
-  const isIframeSelectionRef = useRef(false);
+  const [iframeEditLoading, setIframeEditLoading] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -840,8 +838,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     setToolbarPosition(null);
     setShowComplianceInput(false);
     setComplianceNote('');
-    setIsIframeSelection(false);
-    isIframeSelectionRef.current = false;
   }, []);
 
   const getSelectionRect = useCallback((range: Range) => {
@@ -882,21 +878,17 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   }, [getSelectionRect]);
 
   const syncSelectionToolbar = useCallback(() => {
-    if (isRewriting || isIframeSelectionRef.current) return;
+    if (iframeEditLoading) return;
 
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.toString().trim()) {
-      if (!isIframeSelectionRef.current) {
-        clearSelectionToolbar(showComplianceInput);
-      }
+      clearSelectionToolbar(showComplianceInput);
       return;
     }
 
     const range = selection.getRangeAt(0);
     if (!editorRef.current?.contains(range.commonAncestorContainer)) {
-      if (!isIframeSelectionRef.current) {
-        clearSelectionToolbar(showComplianceInput);
-      }
+      clearSelectionToolbar(showComplianceInput);
       return;
     }
 
@@ -916,7 +908,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     if (!showComplianceInput) {
       setComplianceNote('');
     }
-  }, [calculateToolbarPosition, clearSelectionToolbar, isRewriting, showComplianceInput]);
+  }, [calculateToolbarPosition, clearSelectionToolbar, iframeEditLoading, showComplianceInput]);
 
   const queueSelectionSync = useCallback(() => {
     if (selectionRafRef.current !== null) {
@@ -945,22 +937,17 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     };
   }, [queueSelectionSync]);
 
-  // Click outside to dismiss toolbar
+  // Click outside to dismiss toolbar (only for non-iframe editor)
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (toolbarRef.current && !toolbarRef.current.contains(e.target as Node)) {
-        // Don't dismiss if clicking inside the iframe
-        if (iframeRef.current && (iframeRef.current === e.target || iframeRef.current.contains(e.target as Node))) {
-          return;
-        }
         clearSelectionToolbar();
       }
     };
     if (showToolbar) {
-      // Slight delay to avoid immediate dismissal
       const timer = setTimeout(() => {
         document.addEventListener('mousedown', handleClickOutside);
-      }, 150);
+      }, 100);
       return () => {
         clearTimeout(timer);
         document.removeEventListener('mousedown', handleClickOutside);
@@ -995,107 +982,249 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     };
   }, [calculateToolbarPosition, selectionRange, showComplianceInput, showToolbar]);
 
-  // --- Select & Fix: Iframe Bridge ---
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data.type === 'iframe_selection_cleared') {
-        clearSelectionToolbar(showComplianceInput);
-        setIsIframeSelection(false);
-        isIframeSelectionRef.current = false;
-      } else if (event.data.type === 'iframe_selection_made') {
-        const iframe = iframeRef.current;
-        if (!iframe) return;
-
-        const iframeRect = iframe.getBoundingClientRect();
-        const rect = event.data.rect;
-
-        const estimatedWidth = showComplianceInput ? 300 : 440;
-        const estimatedHeight = showComplianceInput ? 56 : 44;
-        const viewportPadding = 8;
-
-        const absTop = iframeRect.top + rect.top;
-        const absLeft = iframeRect.left + rect.left;
-
-        const centeredLeft = absLeft + (rect.width / 2) - (estimatedWidth / 2);
-        const maxLeft = window.innerWidth - estimatedWidth - viewportPadding;
-        const left = Math.max(viewportPadding, Math.min(centeredLeft, maxLeft));
-
-        let top = absTop - estimatedHeight - 12;
-        if (top < viewportPadding) {
-          top = absTop + rect.height + 12;
+  // --- Iframe Inline Editing (v2) ---
+  // The toolbar lives INSIDE the iframe. No cross-frame selection issues.
+  const iframeSrcDoc = React.useMemo(() => {
+    if (!content?.body) return '';
+    const html = content.body;
+    const injected = `
+      <style>
+        .cf-edit-toolbar {
+          position: fixed;
+          z-index: 99999;
+          display: none;
+          background: #1e293b;
+          border-radius: 10px;
+          padding: 4px;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+          gap: 2px;
+          align-items: center;
+          animation: cf-fade-in 0.15s ease;
         }
+        .cf-edit-toolbar.cf-visible { display: flex; }
+        @keyframes cf-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+        .cf-edit-toolbar button {
+          background: transparent;
+          border: none;
+          color: #e2e8f0;
+          padding: 6px 12px;
+          font-size: 12px;
+          font-weight: 600;
+          font-family: system-ui, -apple-system, sans-serif;
+          cursor: pointer;
+          border-radius: 6px;
+          white-space: nowrap;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          transition: background 0.15s;
+        }
+        .cf-edit-toolbar button:hover { background: #334155; }
+        .cf-edit-toolbar button.cf-loading { opacity: 0.6; pointer-events: none; }
+        .cf-edit-toolbar .cf-divider { width: 1px; height: 20px; background: #475569; margin: 0 2px; }
+        .cf-edit-toolbar .cf-compliance-input {
+          display: flex; gap: 4px; align-items: center;
+        }
+        .cf-edit-toolbar .cf-compliance-input input {
+          background: #334155; border: 1px solid #475569; color: #e2e8f0;
+          padding: 4px 8px; border-radius: 6px; font-size: 12px; width: 160px;
+          outline: none;
+        }
+        .cf-edit-toolbar .cf-compliance-input input:focus { border-color: #6366f1; }
+        .cf-edit-toolbar .cf-compliance-input button { padding: 4px 10px; background: #6366f1; color: white; }
+        .cf-edit-toolbar .cf-compliance-input button:hover { background: #4f46e5; }
+        .new-content-highlight {
+          background: linear-gradient(120deg, rgba(99,102,241,0.15) 0%, rgba(139,92,246,0.15) 100%);
+          border-bottom: 2px solid #6366f1;
+          padding: 1px 0;
+          transition: background 2s ease, border-color 2s ease;
+        }
+      </style>
+      <div class="cf-edit-toolbar" id="cfToolbar">
+        <button onclick="doEdit('rewrite')">&#x21BB; Rewrite</button>
+        <button onclick="doEdit('shorten')">&#x2199; Shorten</button>
+        <button onclick="doEdit('expand')">&#x2197; Expand</button>
+        <div class="cf-divider"></div>
+        <button onclick="showCompliance()" id="cfComplianceBtn">&#x1F6E1; Fix Compliance</button>
+        <div class="cf-compliance-input" id="cfComplianceInput" style="display:none">
+          <input type="text" placeholder="Compliance note..." id="cfComplianceNote" />
+          <button onclick="doCompliance()">Fix</button>
+        </div>
+      </div>
+      <script>
+        (function() {
+          const toolbar = document.getElementById('cfToolbar');
+          const complianceBtn = document.getElementById('cfComplianceBtn');
+          const complianceInput = document.getElementById('cfComplianceInput');
+          const complianceNote = document.getElementById('cfComplianceNote');
+          let savedRange = null;
+          let isProcessing = false;
 
-        setSelectedText(event.data.text);
-        setIsIframeSelection(true);
-        isIframeSelectionRef.current = true;
-        setToolbarPosition({ top: Math.max(viewportPadding, top), left });
-        setShowToolbar(true);
+          function positionToolbar() {
+            const sel = window.getSelection();
+            if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !sel.toString().trim()) {
+              toolbar.classList.remove('cf-visible');
+              complianceInput.style.display = 'none';
+              complianceBtn.style.display = '';
+              savedRange = null;
+              return;
+            }
+            if (isProcessing) return;
+            const range = sel.getRangeAt(0);
+            savedRange = range.cloneRange();
+            const rects = range.getClientRects();
+            if (rects.length === 0) return;
+            const rect = rects[rects.length - 1];
+            const tw = toolbar.offsetWidth || 340;
+            const th = toolbar.offsetHeight || 40;
+            let top = rect.top - th - 10;
+            if (top < 8) top = rect.bottom + 10;
+            let left = rect.left + (rect.width / 2) - (tw / 2);
+            left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
+            toolbar.style.top = top + 'px';
+            toolbar.style.left = left + 'px';
+            toolbar.classList.add('cf-visible');
+          }
 
-        if (!showComplianceInput) {
-          setComplianceNote('');
+          document.addEventListener('selectionchange', () => {
+            if (!isProcessing) positionToolbar();
+          });
+
+          function setLoading(yes) {
+            isProcessing = yes;
+            toolbar.querySelectorAll('button').forEach(b => {
+              if (yes) b.classList.add('cf-loading');
+              else b.classList.remove('cf-loading');
+            });
+          }
+
+          window.doEdit = function(mode) {
+            const sel = window.getSelection();
+            if ((!sel || sel.isCollapsed) && !savedRange) return;
+            const text = sel && !sel.isCollapsed ? sel.toString().trim() : (savedRange ? savedRange.toString().trim() : '');
+            if (!text) return;
+            if (sel && !sel.isCollapsed) savedRange = sel.getRangeAt(0).cloneRange();
+            setLoading(true);
+            window.parent.postMessage({ type: 'iframe_edit_request', text: text, mode: mode }, '*');
+          };
+
+          window.showCompliance = function() {
+            complianceBtn.style.display = 'none';
+            complianceInput.style.display = 'flex';
+            complianceNote.focus();
+          };
+
+          window.doCompliance = function() {
+            const note = complianceNote.value.trim();
+            if (!note) return;
+            const sel = window.getSelection();
+            const text = sel && !sel.isCollapsed ? sel.toString().trim() : (savedRange ? savedRange.toString().trim() : '');
+            if (!text) return;
+            if (sel && !sel.isCollapsed) savedRange = sel.getRangeAt(0).cloneRange();
+            setLoading(true);
+            window.parent.postMessage({ type: 'iframe_edit_request', text: text, mode: 'fix_compliance', complianceNote: note }, '*');
+          };
+
+          complianceNote.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); window.doCompliance(); }
+          });
+
+          window.addEventListener('message', function(e) {
+            if (e.data.type === 'iframe_edit_result') {
+              if (savedRange) {
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(savedRange);
+                const r = sel.getRangeAt(0);
+                const span = document.createElement('span');
+                span.className = 'new-content-highlight';
+                span.textContent = e.data.text;
+                r.deleteContents();
+                r.insertNode(span);
+                sel.removeAllRanges();
+                savedRange = null;
+                setTimeout(() => {
+                  if (span.parentNode) {
+                    const t = document.createTextNode(span.textContent);
+                    span.parentNode.replaceChild(t, span);
+                  }
+                }, 4000);
+              }
+              setLoading(false);
+              toolbar.classList.remove('cf-visible');
+              complianceInput.style.display = 'none';
+              complianceBtn.style.display = '';
+              complianceNote.value = '';
+              // Send updated HTML back to parent for saving
+              window.parent.postMessage({ type: 'iframe_html_updated', html: '<!DOCTYPE html>' + document.documentElement.outerHTML }, '*');
+            }
+          });
+        })();
+      </script>
+    `;
+    if (!html.includes('</body>')) return html + injected;
+    return html.replace('</body>', injected + '</body>');
+  }, [content?.body]);
+
+  // --- Parent-side listener for iframe edit requests ---
+  useEffect(() => {
+    const handleMessage = async (event: MessageEvent) => {
+      if (event.data.type === 'iframe_edit_request' && content && requestId) {
+        setIframeEditLoading(true);
+        try {
+          const response: any = await triggerContentGeneration({
+            topic,
+            contentType,
+            instructions,
+            provider: textProvider,
+            action: 'rewrite',
+            currentContent: event.data.text,
+            rewriteMode: event.data.mode,
+            complianceNote: event.data.complianceNote || undefined,
+          });
+
+          if (response.data) {
+            let rewrittenText = response.data.body || response.data.title || '';
+            rewrittenText = rewrittenText.replace(/<p[^>]*>/g, '').replace(/<\/p>/g, '').trim();
+            iframeRef.current?.contentWindow?.postMessage({ type: 'iframe_edit_result', text: rewrittenText }, '*');
+          }
+        } catch (e: any) {
+          console.error(e);
+          setError(e.message || 'Failed to rewrite selection.');
+          iframeRef.current?.contentWindow?.postMessage({ type: 'iframe_edit_result', text: event.data.text }, '*');
+        } finally {
+          setIframeEditLoading(false);
+        }
+      } else if (event.data.type === 'iframe_html_updated' && content && requestId) {
+        try {
+          const cleanHtml = event.data.html
+            .replace(/class="new-content-highlight"/g, '')
+            .replace(/<div class="cf-edit-toolbar[\s\S]*?<\/div>/g, '')
+            .replace(/<style>[\s\S]*?\.cf-edit-toolbar[\s\S]*?<\/style>/g, '')
+            .replace(/<script>[\s\S]*?cfToolbar[\s\S]*?<\/script>/g, '');
+
+          const savedVersion = await createContentVersion(requestId, {
+            generated_by: 'ai',
+            title: content.title,
+            body: cleanHtml,
+            disclaimers: content.disclaimers,
+          });
+          setContent(savedVersion);
+        } catch (e: any) {
+          console.error('Failed to save iframe edit:', e);
         }
       }
     };
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [clearSelectionToolbar, showComplianceInput]);
+  }, [content, requestId, topic, contentType, instructions, textProvider]);
 
-  const iframeSrcDoc = React.useMemo(() => {
-    if (!content?.body) return '';
-    const html = content.body;
-    const script = `
-      <script>
-        let st;
-        document.addEventListener('selectionchange', () => {
-          clearTimeout(st);
-          st = setTimeout(() => {
-            const sel = window.getSelection();
-            if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !sel.toString().trim()) {
-              if (document.hasFocus()) {
-                window.parent.postMessage({ type: 'iframe_selection_cleared' }, '*');
-              }
-              return;
-            }
-            const range = sel.getRangeAt(0);
-            const rects = range.getClientRects();
-            if (rects.length > 0) {
-              const rect = rects[rects.length - 1];
-              window.parent.postMessage({
-                type: 'iframe_selection_made',
-                text: sel.toString().trim(),
-                rect: { top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height }
-              }, '*');
-            }
-          }, 200);
-        });
-
-        window.addEventListener('message', (e) => {
-          if (e.data.type === 'replace_iframe_selection') {
-            const sel = window.getSelection();
-            if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
-              const r = sel.getRangeAt(0);
-              const span = document.createElement('span');
-              span.className = 'new-content-highlight';
-              span.textContent = e.data.text;
-              r.deleteContents();
-              r.insertNode(span);
-              sel.removeAllRanges();
-              window.parent.postMessage({ type: 'iframe_content_updated', html: document.documentElement.outerHTML }, '*');
-            }
-          }
-        });
-      </script>
-    `;
-    if (!html.includes('</body>')) return html + script;
-    return html.replace('</body>', script + '</body>');
-  }, [content?.body]);
-
-  // --- Select & Fix: Rewrite Handler ---
+  // --- Select & Fix: Rewrite Handler (non-iframe editor only) ---
   const handleRewrite = async (mode: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance') => {
-    if (!selectedText || (!selectionRange && !isIframeSelection) || !content || !requestId) return;
+    if (!selectedText || !selectionRange || !content || !requestId) return;
 
-    setIsRewriting(true);
+    setIframeEditLoading(true);
     setError(null);
 
     try {
@@ -1114,92 +1243,46 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         let rewrittenText = response.data.body || response.data.title || '';
         rewrittenText = rewrittenText.replace(/<p[^>]*>/g, '').replace(/<\/p>/g, '').trim();
 
-        if (!requestId) {
-          throw new Error('No request selected to save rewrite changes.');
-        }
+        const highlightSpan = document.createElement('span');
+        highlightSpan.className = 'new-content-highlight';
+        highlightSpan.textContent = rewrittenText;
 
-        if (isIframeSelection && iframeRef.current?.contentWindow) {
-          iframeRef.current.contentWindow.postMessage({ type: 'replace_iframe_selection', text: rewrittenText }, '*');
+        selectionRange.deleteContents();
+        selectionRange.insertNode(highlightSpan);
 
-          const newHtml: string = await new Promise((resolve) => {
-            const listener = (e: MessageEvent) => {
-              if (e.data.type === 'iframe_content_updated') {
-                window.removeEventListener('message', listener);
-                resolve(e.data.html);
-              }
-            };
-            window.addEventListener('message', listener);
-            setTimeout(() => { window.removeEventListener('message', listener); resolve(''); }, 4000);
-          });
-
-          if (newHtml) {
-            const savedVersion = await createContentVersion(requestId, {
-              generated_by: 'ai',
-              title: content.title,
-              body: newHtml.replace(/class="new-content-highlight"/g, ''),
-              disclaimers: content.disclaimers,
-            });
-
-            setContent({ ...savedVersion, body: newHtml });
-
-            setTimeout(() => {
-              setContent(prev => {
-                if (!prev) return null;
-                return { ...prev, body: prev.body.replace(/class="new-content-highlight"/g, '') };
-              });
-            }, 4500);
-          }
-        } else if (selectionRange && editorRef.current) {
-          const highlightSpan = document.createElement('span');
-          highlightSpan.className = 'new-content-highlight';
-          highlightSpan.textContent = rewrittenText;
-
-          selectionRange.deleteContents();
-          selectionRange.insertNode(highlightSpan);
-
+        if (editorRef.current) {
           const newBody = editorRef.current.innerHTML;
-
           const savedVersion = await createContentVersion(requestId, {
             generated_by: 'ai',
             title: content.title,
             body: newBody.replace(/class="new-content-highlight"/g, ''),
             disclaimers: content.disclaimers,
           });
-
-          setContent({
-            ...savedVersion,
-            body: newBody,
-          });
-
-          setTimeout(() => {
-            if (highlightSpan.parentNode) {
-              const textNode = document.createTextNode(highlightSpan.textContent || '');
-              highlightSpan.parentNode.replaceChild(textNode, highlightSpan);
-            }
-
-            setContent(prev => {
-              if (!prev) return null;
-              return {
-                ...prev,
-                body: prev.body.replace(/class="new-content-highlight"/g, ''),
-              };
-            });
-          }, 4500);
+          setContent({ ...savedVersion, body: newBody });
         }
+
+        setTimeout(() => {
+          if (highlightSpan.parentNode) {
+            const textNode = document.createTextNode(highlightSpan.textContent || '');
+            highlightSpan.parentNode.replaceChild(textNode, highlightSpan);
+          }
+          setContent(prev => {
+            if (!prev) return null;
+            return { ...prev, body: prev.body.replace(/class="new-content-highlight"/g, '') };
+          });
+        }, 4500);
       }
     } catch (e: any) {
       console.error(e);
       setError(e.message || 'Failed to rewrite selection.');
     } finally {
-      setIsRewriting(false);
+      setIframeEditLoading(false);
       setShowToolbar(false);
       setShowComplianceInput(false);
       setComplianceNote('');
       setSelectedText('');
       setSelectionRange(null);
       setToolbarPosition(null);
-      setIsIframeSelection(false);
-      isIframeSelectionRef.current = false;
     }
   };
 
@@ -1827,7 +1910,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                       }
                     }}
                   >
-                    {isRewriting ? (
+                    {iframeEditLoading ? (
                       <div className="flex items-center gap-2 px-3 py-1">
                         <Loader2 size={14} className="animate-spin text-primary-500" />
                         <span className="text-xs text-slate-500 font-medium">Rewriting...</span>
