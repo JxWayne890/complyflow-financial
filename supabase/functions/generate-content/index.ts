@@ -30,6 +30,57 @@ Formatting:
 - Focus on wealth preservation, endowments, and alternative investments.
 `;
 
+const legacyWealthBlogStyle = `
+You are a senior wealth advisor at Legacy Wealth Management writing a premium blog article.
+Tone: Professional, educational, authoritative, yet accessible. NOT salesy.
+
+IMPORTANT OUTPUT FORMAT:
+You MUST output your blog using the following structured format with exact markers. Do NOT output raw HTML.
+
+---TITLE---
+[Your compelling blog post title here]
+---SUBTITLE---
+[A one-sentence subtitle/meta description]
+---CATEGORY---
+[One word category like: INVESTING, PLANNING, TAX, RETIREMENT, ESTATE, MARKETS, RISK]
+---READ_TIME---
+[Estimated read time like: 8 MIN READ]
+---LEAD---
+[An italicized lead paragraph that hooks the reader — 2-3 sentences max]
+---SECTION---
+## Section Heading
+[2-4 paragraphs of flowing, human narrative content. Use **bold** for emphasis.]
+---SECTION---
+## Another Section Heading
+[More content...]
+---PULLQUOTE---
+[A powerful, memorable quote from the article — 1-2 sentences]
+[Attribution — e.g., "LEGACY WEALTH MANAGEMENT"]
+---SECTION---
+## Another Section Heading
+[Continue with more sections as needed...]
+---INSIGHT---
+[A key insight or actionable takeaway — 1-2 sentences]
+---SECTION---
+## Final Section Heading
+[Concluding section content — do NOT use "In conclusion" — just naturally wrap up.]
+---STATS---
+[stat1_number]|[stat1_label]
+[stat2_number]|[stat2_label]
+[stat3_number]|[stat3_label]
+---DISCLAIMER---
+[Standard investment disclaimer text]
+
+Rules:
+- Write in a flowing, human narrative. No AI-isms.
+- DO NOT use bullet points with dashes/hyphens.
+- You MUST include at least 3-5 ---SECTION--- blocks.
+- You MUST include exactly one ---PULLQUOTE--- block.
+- You MUST include exactly one ---INSIGHT--- block.
+- The ---STATS--- block should have exactly 3 stats relevant to the topic.
+- Focus on wealth preservation, endowments, and alternative investments.
+`;
+
 const posterStyle = `
 You are a creative director for a high-end financial firm.
 Task: Describe a "Poster Style" visual asset or video script.
@@ -59,6 +110,583 @@ const escapeHtml = (value: string) =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+
+// ── LWM Blog HTML Template Builder ──
+function buildLwmBlogHtml(structured: {
+  title: string;
+  subtitle: string;
+  category: string;
+  readTime: string;
+  lead: string;
+  sections: { heading: string; body: string }[];
+  pullquote: { text: string; attribution: string };
+  insight: string;
+  stats: { number: string; label: string }[];
+  disclaimer: string;
+  chartData?: any;
+}): string {
+  const today = new Date();
+  const dateStr = today.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).toUpperCase();
+
+  // Convert markdown-like bold to HTML
+  const md = (text: string) => text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+  // Build section HTML
+  const sectionsHtml = structured.sections.map(s => {
+    const heading = s.heading.replace(/^##\s*/, '').replace(/\*\*/g, '');
+    const paragraphs = s.body.split('\n\n').filter(p => p.trim()).map(p =>
+      `<p>${md(p.trim())}</p>`
+    ).join('\n  ');
+    return `
+  <span class="h2-accent"></span>
+  <h2>${heading}</h2>
+  ${paragraphs}`;
+  }).join('\n\n  <div class="divider"><span class="compass">◆</span></div>\n');
+
+  // Build stats HTML
+  const statsHtml = structured.stats.slice(0, 3).map(s => `
+    <div class="stat">
+      <div class="stat-n">${s.number}</div>
+      <div class="stat-l">${s.label}</div>
+    </div>`).join('\n');
+
+  // Build chart HTML if chart data exists
+  let chartHtml = '';
+  if (structured.chartData) {
+    chartHtml = `
+  <div class="chart-wrap">
+    <div class="ct">${structured.chartData.title || 'Data Overview'}</div>
+    <div class="cs">${structured.chartData.dataLabel || 'Values'}</div>
+    <canvas id="lwm-chart" height="260"></canvas>
+    <div class="csrc">Source: Legacy Wealth Management Research</div>
+  </div>
+  <script>
+  (function() {
+    const ctx = document.getElementById('lwm-chart');
+    if (!ctx) return;
+    const chartData = ${JSON.stringify(structured.chartData)};
+    new Chart(ctx, {
+      type: chartData.type || 'bar',
+      data: {
+        labels: chartData.data.map(d => d.name),
+        datasets: [{
+          label: chartData.dataLabel || 'Value',
+          data: chartData.data.map(d => d.value),
+          backgroundColor: ['#1a365f','#4c6b36','#b3822f','#75426a','#1f5c7a','#7a2828'],
+          borderWidth: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  })();
+  </script>`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${structured.title} | Legacy Wealth Management</title>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;500;600;700&family=Poppins:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --navy:       #1a365f;
+    --dark-navy:  #1f2758;
+    --steel:      #a2bbc3;
+    --light-steel:#dbe6e7;
+    --off-white:  #f4f4f4;
+    --gold:       #b3822f;
+    --purple:     #75426a;
+    --sage:       #83a762;
+    --dark-sage:  #4c6b36;
+    --yellow:     #fcf178;
+    --text-dark:  #1a1a2a;
+    --text-mid:   #3a4a5a;
+    --text-light: #647180;
+    --border:     #dbe6e7;
+    --white:      #ffffff;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Poppins', sans-serif;
+    background: var(--off-white);
+    color: var(--text-dark);
+    font-size: 16px;
+    line-height: 1.85;
+  }
+  .site-header {
+    background: var(--navy);
+    padding: 0;
+    border-bottom: 3px solid var(--gold);
+  }
+  .header-inner {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 18px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .header-logo { font-family: 'Oswald', sans-serif; color: var(--gold); font-size: 1.4rem; font-weight: 600; letter-spacing: 0.08em; }
+  .header-right { text-align: right; }
+  .header-right .tagline {
+    color: var(--steel);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    font-family: 'Oswald', sans-serif;
+    font-weight: 300;
+  }
+  .header-right .website {
+    color: var(--gold);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    font-family: 'Oswald', sans-serif;
+    font-weight: 400;
+  }
+  .spectrum-banner {
+    display: flex;
+    height: 44px;
+    overflow: hidden;
+  }
+  .sb { flex: 1; display: flex; align-items: center; justify-content: center;
+         font-family: 'Oswald', sans-serif; font-size: 0.68rem; font-weight: 500;
+         letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.9); }
+  .sb1 { background: #1a365f; }
+  .sb2 { background: #1f3e6a; }
+  .sb3 { background: #4c6b36; }
+  .sb4 { background: #8a6020; }
+  .sb5 { background: #7a2828; }
+  .hero {
+    background: var(--dark-navy);
+    padding: 80px 32px 68px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 100% 70% at 50% 0%, rgba(179,130,47,0.13) 0%, transparent 65%),
+      url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M30 0 L60 30 L30 60 L0 30 Z' fill='none' stroke='rgba(162,187,195,0.04)' stroke-width='1'/%3E%3C/svg%3E");
+  }
+  .hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--gold);
+    color: var(--gold);
+    font-family: 'Oswald', sans-serif;
+    font-size: 0.68rem;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    padding: 6px 18px;
+    margin-bottom: 30px;
+    position: relative;
+  }
+  .hero h1 {
+    font-family: 'Oswald', sans-serif;
+    color: var(--white);
+    font-size: clamp(2.4rem, 5.5vw, 4rem);
+    font-weight: 600;
+    line-height: 1.1;
+    max-width: 800px;
+    margin: 0 auto 18px;
+    position: relative;
+    letter-spacing: 0.02em;
+  }
+  .hero h1 span { color: var(--gold); }
+  .hero-sub {
+    color: var(--steel);
+    max-width: 560px;
+    margin: 0 auto 38px;
+    font-size: 0.98rem;
+    font-weight: 300;
+    line-height: 1.8;
+    position: relative;
+  }
+  .hero-meta {
+    display: flex; justify-content: center; gap: 28px; flex-wrap: wrap; position: relative;
+  }
+  .hero-meta span {
+    color: rgba(162,187,195,0.6);
+    font-size: 0.76rem;
+    letter-spacing: 0.07em;
+    font-family: 'Oswald', sans-serif;
+    font-weight: 300;
+  }
+  .hero-meta span b { color: var(--gold); font-weight: 500; }
+  .container { max-width: 880px; margin: 0 auto; padding: 0 28px; }
+  .article { padding: 68px 0 80px; }
+  .lead {
+    font-family: 'Poppins', sans-serif;
+    font-size: 1.08rem;
+    color: var(--text-mid);
+    font-weight: 300;
+    font-style: italic;
+    border-left: 4px solid var(--gold);
+    padding-left: 24px;
+    margin-bottom: 52px;
+    line-height: 1.9;
+  }
+  h2 {
+    font-family: 'Oswald', sans-serif;
+    color: var(--navy);
+    font-size: 1.85rem;
+    font-weight: 600;
+    margin: 60px 0 16px;
+    line-height: 1.2;
+    letter-spacing: 0.03em;
+  }
+  .h2-accent {
+    display: block;
+    width: 44px;
+    height: 3px;
+    background: linear-gradient(90deg, var(--gold), var(--dark-sage));
+    margin-bottom: 14px;
+  }
+  h3 {
+    font-family: 'Oswald', sans-serif;
+    color: var(--dark-navy);
+    font-size: 1.2rem;
+    font-weight: 500;
+    margin: 34px 0 10px;
+    letter-spacing: 0.02em;
+  }
+  p { margin-bottom: 20px; color: var(--text-mid); font-weight: 300; }
+  strong { font-weight: 600; color: var(--navy); }
+  .divider {
+    display: flex; align-items: center; gap: 14px; margin: 52px 0;
+  }
+  .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  .divider .compass { color: var(--gold); font-size: 1.1rem; }
+  .pullquote {
+    background: var(--navy);
+    color: var(--white);
+    padding: 28px 36px;
+    margin: 44px 0;
+    border-left: 5px solid var(--gold);
+    font-family: 'Poppins', sans-serif;
+    font-size: 1.08rem;
+    font-style: italic;
+    font-weight: 300;
+    line-height: 1.7;
+    position: relative;
+  }
+  .pullquote::before {
+    content: '\\201C';
+    position: absolute;
+    top: -10px; left: 24px;
+    font-size: 5rem;
+    color: var(--gold);
+    opacity: 0.25;
+    line-height: 1;
+    font-family: Georgia, serif;
+  }
+  .pullquote cite {
+    display: block;
+    color: var(--gold);
+    font-size: 0.75rem;
+    font-style: normal;
+    font-family: 'Oswald', sans-serif;
+    letter-spacing: 0.1em;
+    margin-top: 14px;
+    font-weight: 400;
+  }
+  .insight {
+    display: flex; gap: 16px; align-items: flex-start;
+    background: var(--light-steel);
+    border: 1px solid var(--steel);
+    border-left: 4px solid var(--dark-sage);
+    padding: 18px 22px;
+    margin: 30px 0;
+  }
+  .insight .ico { font-size: 1.3rem; flex-shrink: 0; margin-top: 2px; }
+  .insight p { margin: 0; font-size: 0.9rem; color: var(--text-mid); }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+    gap: 16px;
+    margin: 36px 0;
+  }
+  .stat {
+    background: var(--navy);
+    padding: 26px 18px;
+    text-align: center;
+    border-top: 3px solid var(--gold);
+    position: relative;
+  }
+  .stat-n { font-family: 'Oswald', sans-serif; font-size: 2.4rem; color: var(--gold); line-height: 1; margin-bottom: 8px; font-weight: 500; }
+  .stat-l { color: var(--steel); font-size: 0.75rem; line-height: 1.45; font-weight: 300; }
+  .chart-wrap {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--navy);
+    padding: 32px;
+    margin: 42px 0;
+    box-shadow: 0 2px 16px rgba(26,54,95,0.07);
+  }
+  .ct { font-family: 'Oswald', sans-serif; color: var(--navy); font-size: 1.1rem; font-weight: 600; margin-bottom: 4px; letter-spacing: 0.02em; }
+  .cs { font-size: 0.8rem; color: var(--text-light); margin-bottom: 22px; font-weight: 300; }
+  .csrc { font-size: 0.71rem; color: #aaa; font-style: italic; margin-top: 14px; }
+  canvas { max-width: 100%; }
+  .disclaimer {
+    background: var(--dark-navy);
+    color: rgba(162,187,195,0.7);
+    padding: 40px 44px;
+    font-size: 0.78rem;
+    line-height: 1.8;
+    border-top: 3px solid var(--gold);
+    margin-top: 64px;
+  }
+  .disclaimer strong {
+    color: var(--gold);
+    font-family: 'Oswald', sans-serif;
+    font-size: 0.82rem;
+    display: block;
+    margin-bottom: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .site-footer {
+    background: var(--navy);
+    border-top: 1px solid rgba(179,130,47,0.3);
+    padding: 22px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .footer-logo { font-family: 'Oswald', sans-serif; color: var(--gold); font-size: 1rem; font-weight: 500; opacity: 0.8; }
+  .footer-copy {
+    color: rgba(162,187,195,0.45);
+    font-size: 0.72rem;
+    letter-spacing: 0.07em;
+    font-family: 'Oswald', sans-serif;
+    font-weight: 300;
+  }
+  .footer-web {
+    color: var(--gold);
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    font-family: 'Oswald', sans-serif;
+    font-weight: 400;
+  }
+  @media (max-width: 640px) {
+    .stats { grid-template-columns: 1fr 1fr; }
+    .chart-wrap { padding: 18px 14px; }
+    h2 { font-size: 1.55rem; }
+    .hero h1 { font-size: 2rem; }
+    .disclaimer { padding: 28px 22px; }
+    .header-inner { justify-content: center; text-align: center; }
+    .header-right { text-align: center; }
+    .site-footer { justify-content: center; text-align: center; }
+  }
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <div class="header-logo">LEGACY WEALTH MANAGEMENT</div>
+    <div class="header-right">
+      <div class="tagline">Preserving Wealth Across Generations</div>
+      <div class="website">legacywealthmanagement.com</div>
+    </div>
+  </div>
+</header>
+
+<div class="spectrum-banner">
+  <div class="sb sb1">Conservative</div>
+  <div class="sb sb2">Moderate</div>
+  <div class="sb sb3">Balanced</div>
+  <div class="sb sb4">Growth</div>
+  <div class="sb sb5">Aggressive</div>
+</div>
+
+<section class="hero">
+  <div class="hero-badge">◆ ${structured.category} ◆</div>
+  <h1>${structured.title}</h1>
+  <p class="hero-sub">${structured.subtitle}</p>
+  <div class="hero-meta">
+    <span><b>Legacy Wealth Management</b></span>
+    <span>${dateStr}</span>
+    <span>${structured.readTime}</span>
+  </div>
+</section>
+
+<article class="article">
+  <div class="container">
+
+    <p class="lead">${md(structured.lead)}</p>
+
+    ${sectionsHtml}
+
+    <div class="pullquote">
+      ${md(structured.pullquote.text)}
+      <cite>— ${structured.pullquote.attribution}</cite>
+    </div>
+
+    <div class="insight">
+      <span class="ico">💡</span>
+      <p>${md(structured.insight)}</p>
+    </div>
+
+    <div class="stats">
+      ${statsHtml}
+    </div>
+
+    ${chartHtml}
+
+  </div>
+</article>
+
+<div class="container">
+  <div class="disclaimer">
+    <strong>Important Disclosure</strong>
+    ${structured.disclaimer}
+  </div>
+</div>
+
+<footer class="site-footer">
+  <div class="footer-logo">LEGACY WEALTH MANAGEMENT</div>
+  <div class="footer-copy">&copy; ${today.getFullYear()} Legacy Wealth Management. All Rights Reserved.</div>
+  <div class="footer-web">legacywealthmanagement.com</div>
+</footer>
+
+</body>
+</html>`;
+}
+
+// Parse AI structured text into template data
+function parseStructuredBlog(rawText: string, topic: string): {
+  title: string;
+  subtitle: string;
+  category: string;
+  readTime: string;
+  lead: string;
+  sections: { heading: string; body: string }[];
+  pullquote: { text: string; attribution: string };
+  insight: string;
+  stats: { number: string; label: string }[];
+  disclaimer: string;
+  chartData?: any;
+} {
+  const getBlock = (marker: string): string => {
+    const regex = new RegExp(`---${marker}---\\s*([\\s\\S]*?)(?=---[A-Z_]+---|$)`);
+    const match = rawText.match(regex);
+    return match ? match[1].trim() : '';
+  };
+
+  const title = getBlock('TITLE') || `Deep Dive: ${topic}`;
+  const subtitle = getBlock('SUBTITLE') || 'Expert analysis from Legacy Wealth Management.';
+  const category = getBlock('CATEGORY') || 'INVESTING';
+  const readTime = getBlock('READ_TIME') || '8 MIN READ';
+  const lead = getBlock('LEAD') || '';
+
+  // Parse sections
+  const sectionsRaw = rawText.split('---SECTION---').slice(1);
+  const sections = sectionsRaw.map(s => {
+    // Stop at next marker
+    const cleaned = s.replace(/---[A-Z_]+---[\s\S]*$/, '').trim();
+    const lines = cleaned.split('\n');
+    const headingLine = lines.find(l => l.trim().startsWith('##')) || '';
+    const heading = headingLine.replace(/^##\s*/, '').replace(/\*\*/g, '').trim();
+    const body = lines.filter(l => !l.trim().startsWith('##')).join('\n').trim();
+    return { heading: heading || 'Key Considerations', body };
+  }).filter(s => s.body.length > 0);
+
+  // Parse pullquote
+  const pullquoteRaw = getBlock('PULLQUOTE');
+  const pullquoteLines = pullquoteRaw.split('\n').filter(l => l.trim());
+  const pullquote = {
+    text: pullquoteLines[0] || 'Sound financial planning is the foundation of lasting wealth.',
+    attribution: pullquoteLines[1] || 'LEGACY WEALTH MANAGEMENT',
+  };
+
+  const insight = getBlock('INSIGHT') || 'Consult with your financial advisor to discuss how these strategies apply to your specific situation.';
+
+  // Parse stats
+  const statsRaw = getBlock('STATS');
+  const stats = statsRaw.split('\n').filter(l => l.includes('|')).map(l => {
+    const [num, label] = l.split('|').map(s => s.trim());
+    return { number: num, label };
+  }).slice(0, 3);
+
+  // Ensure we have 3 stats
+  while (stats.length < 3) {
+    stats.push({ number: '—', label: 'Data point' });
+  }
+
+  const disclaimer = getBlock('DISCLAIMER') ||
+    'This material is for informational purposes only and does not constitute investment advice. Past performance is not indicative of future results. Consult with a qualified financial advisor before making investment decisions.';
+
+  return { title, subtitle, category, readTime, lead, sections, pullquote, insight, stats, disclaimer };
+}
+
+function parseUnstructuredBlog(title: string, rawText: string): any {
+  const blocks = rawText.split('\n\n').filter(b => b.trim());
+  const lead = blocks.length > 0 && !blocks[0].startsWith('#') ? blocks[0].replace(/\*\*/g, '') : 'An in-depth perspective on current market conditions and strategic planning.';
+
+  const sections = [];
+  let currentBody: string[] = [];
+  let currentHeading = 'Key Considerations';
+
+  const startIndex = blocks.length > 0 && !blocks[0].startsWith('#') ? 1 : 0;
+
+  for (let i = startIndex; i < blocks.length; i++) {
+    const block = blocks[i].trim();
+    if (block.startsWith('##') || block.startsWith('#')) {
+      if (currentBody.length > 0) {
+        sections.push({ heading: currentHeading, body: currentBody.join('\n\n') });
+      }
+      currentHeading = block.replace(/^#+\s*/, '');
+      currentBody = [];
+    } else {
+      currentBody.push(block);
+    }
+  }
+
+  if (currentBody.length > 0) {
+    sections.push({ heading: currentHeading, body: currentBody.join('\n\n') });
+  }
+
+  if (sections.length === 0) {
+    sections.push({ heading: 'Analysis', body: rawText });
+  }
+
+  return {
+    title,
+    subtitle: 'Expert analysis and wealth preservation strategies.',
+    category: 'INSIGHTS',
+    readTime: '5 MIN READ',
+    lead,
+    sections,
+    pullquote: {
+      text: "Disciplined investing and long-term planning remain the foundations of lasting wealth.",
+      attribution: "LEGACY WEALTH MANAGEMENT"
+    },
+    insight: "We encourage you to review these concepts with your advisor to ensure alignment with your goals.",
+    stats: [
+      { number: '1', label: 'Priority Focus' },
+      { number: '100%', label: 'Commitment' },
+      { number: '360°', label: 'Perspective' }
+    ],
+    disclaimer: 'This material is for informational purposes only and does not constitute investment advice. Past performance is not indicative of future results. Consult with a qualified financial advisor before making investment decisions.'
+  };
+}
 
 async function generateWithClaude(params: {
   apiKey: string;
@@ -356,8 +984,11 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
       );
     }
 
-    let systemPrompt = legacyWealthStyle;
-    let userContent = `Write a ${contentType} about ${topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}
+    const isBlogType = contentType && contentType.toLowerCase() === 'blog';
+    let systemPrompt = isBlogType ? legacyWealthBlogStyle : legacyWealthStyle;
+    let userContent = isBlogType
+      ? `Write a premium blog article about: ${topic}.\n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}\n\nRemember: Use the exact structured format with ---TITLE---, ---SUBTITLE---, ---CATEGORY---, ---READ_TIME---, ---LEAD---, ---SECTION---, ---PULLQUOTE---, ---INSIGHT---, ---STATS---, and ---DISCLAIMER--- markers.\n\nIf the topic involves data, trends, asset allocation, or comparisons, also append a JSON block at the very end formatted like:\n<script type="application/json" id="chart-data">\n{"title": "Chart Title", "type": "bar", "dataLabel": "Metric", "data": [{"name": "A", "value": 10}]}\n</script>`
+      : `Write a ${contentType} about ${topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}
 
 If the topic involves data, trends, asset allocation, or comparisons, you MUST append a JSON block to the very end of your response formatted exactly like this:
 <script type="application/json" id="chart-data">
@@ -516,34 +1147,65 @@ IMPORTANT: Return ONLY the rewritten passage.
         title = `Deep Dive: ${topic}`;
       }
 
-      const htmlBody = body.split("\n\n").map((block: string) => {
-        const trimmed = block.trim();
-        if (!trimmed) return "";
+      let htmlBody: string;
+      let finalTitle = title;
 
-        // Handle timestamps for Video Scripts: [MM:SS] or MM:SS
-        const timestampRegex = /^\[?(\d{1,2}:\d{2})\]?/;
-        const match = trimmed.match(timestampRegex);
-
-        if (match) {
-          const timestamp = match[1];
-          const content = trimmed.replace(timestampRegex, "").trim();
-          return `
-            <div style="margin-bottom: 24px; padding: 12px; background: #f8fafc; border-radius: 8px; border-left: 4px solid #2563eb;">
-              <div style="color: #2563eb; font-weight: 700; margin-bottom: 4px; font-size: 14px;">${timestamp}</div>
-              <p style="margin: 0; color: #334155; line-height: 1.6;">${content.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>
-            </div>
-          `;
+      // Check if this is a blog — use the LWM template
+      if (isBlogType) {
+        // Extract chart data before parsing
+        const chartRegex = /<script[^>]*id=["']chart-data["'][^>]*>([\s\S]*?)<\/script>/i;
+        const chartMatch = body.match(chartRegex);
+        let chartData = null;
+        let bodyForParsing = body;
+        if (chartMatch) {
+          try {
+            let jsonStr = chartMatch[1].trim().replace(/^```(json)?\s*/i, '').replace(/```$/, '').trim();
+            chartData = JSON.parse(jsonStr);
+          } catch (_e) { /* ignore parse errors */ }
+          bodyForParsing = body.replace(chartMatch[0], '').trim();
         }
 
-        if (trimmed.startsWith("###")) return `<h3 style="margin-top: 32px; margin-bottom: 16px; font-weight: 700;">${trimmed.replace(/^###\s*/, "")}</h3>`;
-        if (trimmed.startsWith("##")) return `<h2 style="margin-top: 40px; margin-bottom: 20px; font-weight: 700;">${trimmed.replace(/^##\s*/, "")}</h2>`;
-        if (trimmed.startsWith("#")) return `<h1 style="margin-top: 48px; margin-bottom: 24px; font-weight: 800;">${trimmed.replace(/^#\s*/, "")}</h1>`;
-        return `<p style="margin-bottom: 24px;">${trimmed.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`;
-      }).join("\n");
+        let parsed: any;
+        if (bodyForParsing.includes('---SECTION---') || bodyForParsing.includes('---TITLE---')) {
+          const fullStructured = bodyForParsing.includes('---TITLE---') ? bodyForParsing : `---TITLE---\n${title}\n${bodyForParsing}`;
+          parsed = parseStructuredBlog(fullStructured, topic);
+        } else {
+          parsed = parseUnstructuredBlog(title, bodyForParsing);
+        }
+
+        if (chartData) parsed.chartData = chartData;
+        finalTitle = parsed.title;
+        htmlBody = buildLwmBlogHtml(parsed);
+      } else {
+        // Non-blog: use existing simple HTML formatting
+        htmlBody = body.split("\n\n").map((block: string) => {
+          const trimmed = block.trim();
+          if (!trimmed) return "";
+
+          const timestampRegex = /^\[?(\d{1,2}:\d{2})\]?/;
+          const match = trimmed.match(timestampRegex);
+
+          if (match) {
+            const timestamp = match[1];
+            const content = trimmed.replace(timestampRegex, "").trim();
+            return `
+              <div style="margin-bottom: 24px; padding: 12px; background: #f8fafc; border-radius: 8px; border-left: 4px solid #2563eb;">
+                <div style="color: #2563eb; font-weight: 700; margin-bottom: 4px; font-size: 14px;">${timestamp}</div>
+                <p style="margin: 0; color: #334155; line-height: 1.6;">${content.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>
+              </div>
+            `;
+          }
+
+          if (trimmed.startsWith("###")) return `<h3 style="margin-top: 32px; margin-bottom: 16px; font-weight: 700;">${trimmed.replace(/^###\s*/, "")}</h3>`;
+          if (trimmed.startsWith("##")) return `<h2 style="margin-top: 40px; margin-bottom: 20px; font-weight: 700;">${trimmed.replace(/^##\s*/, "")}</h2>`;
+          if (trimmed.startsWith("#")) return `<h1 style="margin-top: 48px; margin-bottom: 24px; font-weight: 800;">${trimmed.replace(/^#\s*/, "")}</h1>`;
+          return `<p style="margin-bottom: 24px;">${trimmed.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`;
+        }).join("\n");
+      }
 
       return {
         id: res.id,
-        title,
+        title: finalTitle,
         body: htmlBody || "<p>No content generated.</p>",
         disclaimers: `Generated by ${textProvider === 'kimi' ? 'Kimi K2.5' : 'Claude'}`,
       };

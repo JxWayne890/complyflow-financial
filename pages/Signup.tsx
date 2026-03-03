@@ -2,11 +2,13 @@ import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { ShieldCheck, UserPlus, AlertCircle } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
+import { UserRole } from '../types';
 
 const Signup: React.FC = () => {
     const navigate = useNavigate();
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [role, setRole] = useState<UserRole>(UserRole.ADVISOR);
 
     const handleSignup = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -27,6 +29,11 @@ const Signup: React.FC = () => {
             const { data, error } = await supabase.auth.signUp({
                 email,
                 password,
+                options: {
+                    data: {
+                        role: role
+                    }
+                }
             });
 
             if (error) throw error;
@@ -62,6 +69,29 @@ const Signup: React.FC = () => {
                         <p className="text-sm text-red-600">{error}</p>
                     </div>
                 )}
+
+                <div className="mb-8 p-1 bg-slate-100 rounded-xl flex gap-1">
+                    <button
+                        type="button"
+                        onClick={() => setRole(UserRole.ADVISOR)}
+                        className={`flex-1 py-2.5 px-4 rounded-lg text-sm font-semibold transition-all ${role === UserRole.ADVISOR
+                            ? 'bg-white text-primary-700 shadow-sm border border-slate-200/50'
+                            : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+                            }`}
+                    >
+                        Advisor
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setRole(UserRole.COMPLIANCE)}
+                        className={`flex-1 py-2.5 px-4 rounded-lg text-sm font-semibold transition-all ${role === UserRole.COMPLIANCE
+                            ? 'bg-white text-primary-700 shadow-sm border border-slate-200/50'
+                            : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+                            }`}
+                    >
+                        Compliance Team
+                    </button>
+                </div>
 
                 <form onSubmit={handleSignup} className="space-y-5">
                     <div>
@@ -100,12 +130,12 @@ const Signup: React.FC = () => {
                     <button
                         type="submit"
                         disabled={loading}
-                        className="w-full py-3 bg-primary-600 text-white font-semibold rounded-lg hover:bg-primary-700 transition-all shadow-md shadow-primary-600/20 flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
+                        className="w-full py-4 bg-primary-600 text-white font-bold rounded-xl hover:bg-primary-700 transition-all shadow-lg shadow-primary-600/20 flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed text-base"
                     >
                         {loading ? 'Creating Account...' : (
                             <>
-                                <UserPlus size={18} />
-                                Sign Up
+                                <UserPlus size={20} />
+                                Join as {role === UserRole.ADVISOR ? 'Advisor' : 'Compliance'}
                             </>
                         )}
                     </button>

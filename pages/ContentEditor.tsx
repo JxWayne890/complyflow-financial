@@ -261,6 +261,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       return requestId;
     }
 
+    console.log("Creating request with:", {
+      advisor_id: profile.id,
+      org_id: profile.org_id,
+      role: profile.role,
+      clientId: parsedClientId
+    });
+
     const { data: requestData, error: requestError } = await supabase
       .from('content_requests')
       .insert({
@@ -275,7 +282,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       .select('id')
       .single();
 
-    if (requestError) throw requestError;
+    if (requestError) {
+      if (requestError.code === '42501' || requestError.message?.includes('row-level security')) {
+        const errorDetails = `RLS Policy Violation. Your current role is '${profile.role}'. The database requires 'advisor' or 'admin' to create content. ID: ${profile.id}, Org: ${profile.org_id}`;
+        throw new Error(errorDetails);
+      }
+      throw requestError;
+    }
     setRequestId(requestData.id);
     return requestData.id;
   };
@@ -1121,6 +1134,25 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                 <Users size={18} />
                 Publish to Portal
               </button>
+              {content && content.body.includes('<!DOCTYPE html>') && (
+                <button
+                  onClick={() => {
+                    const blob = new Blob([content.body], { type: 'text/html' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `${content.title || 'blog-post'}.html`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="inline-flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                >
+                  <FileText size={18} />
+                  Export HTML
+                </button>
+              )}
               {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
                 <>
                   <button
@@ -1588,17 +1620,28 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   }}
                   placeholder="Untitled Document"
                 />
-                <div
-                  ref={editorRef}
-                  className="prose prose-slate prose-lg max-w-none focus:outline-none min-h-[300px]"
-                  contentEditable
-                  suppressContentEditableWarning
-                  dangerouslySetInnerHTML={{ __html: content.body }}
-                  onBlur={(e) => setContent({ ...content, body: e.currentTarget.innerHTML })}
-                  onMouseUp={handleTextSelection}
-                  onKeyUp={handleTextSelection}
-                  onTouchEnd={handleTextSelection}
-                />
+                {content.body.includes('<!DOCTYPE html>') ? (
+                  <div className="w-full relative border border-slate-200 rounded-xl overflow-hidden shadow-sm mt-4 bg-white" style={{ height: '800px' }}>
+                    <iframe
+                      srcDoc={content.body}
+                      title="Blog Preview"
+                      className="w-full h-full border-none bg-white"
+                      sandbox="allow-scripts allow-same-origin"
+                    />
+                  </div>
+                ) : (
+                  <div
+                    ref={editorRef}
+                    className="prose prose-slate prose-lg max-w-none focus:outline-none min-h-[300px]"
+                    contentEditable
+                    suppressContentEditableWarning
+                    dangerouslySetInnerHTML={{ __html: content.body }}
+                    onBlur={(e) => setContent({ ...content, body: e.currentTarget.innerHTML })}
+                    onMouseUp={handleTextSelection}
+                    onKeyUp={handleTextSelection}
+                    onTouchEnd={handleTextSelection}
+                  />
+                )}
 
                 {/* Generate Image Button (Only if no image present or as an option) */}
                 {(generationMode === 'text' || generationMode === 'both') && !isExtending && !isGenerating && (

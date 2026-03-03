@@ -144,12 +144,13 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
 
             if (clientError) throw clientError;
 
-            // Set client data immediately so it renders even if shares fail
-            setClient({
-                ...clientData,
-                contentCount: 0,
-                socialAccounts: []
-            });
+            if (clientData) {
+                setClient({
+                    ...clientData,
+                    contentCount: 0,
+                    socialAccounts: []
+                });
+            }
 
             // 2. Fetch Shared Content (separate try/catch so client still shows)
             try {
@@ -159,7 +160,7 @@ const ClientDetail: React.FC<ClientDetailProps> = ({ profile }) => {
                         id, shared_at, status,
                         content_versions (
                             id, created_at, title, body,
-                            content_requests (
+                            content_requests!request_id (
                                 id, topic_text, status, content_type
                             )
                         )

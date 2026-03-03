@@ -9,7 +9,7 @@ import ContentEditor from './pages/ContentEditor';
 import ClientsList from './pages/ClientsList';
 import ClientDetail from './pages/ClientDetail';
 import MyLibrary from './pages/MyLibrary';
-import Changelog from './pages/Changelog';
+
 import { UserRole, Profile } from './types';
 import { supabase } from './services/supabaseClient';
 import { Session } from '@supabase/supabase-js';
@@ -56,8 +56,7 @@ const App: React.FC = () => {
     }
   };
 
-  // Role Switcher State
-  const [roleOverride, setRoleOverride] = useState<UserRole | null>(null);
+
 
   if (loading) {
     return (
@@ -67,7 +66,7 @@ const App: React.FC = () => {
     );
   }
 
-  const userRole = roleOverride || profile?.role || UserRole.ADVISOR;
+  const userRole = profile?.role || UserRole.ADVISOR;
 
   // Demo Profile Fallback
   const effectiveProfile: Profile = profile || {
@@ -86,58 +85,54 @@ const App: React.FC = () => {
 
         {/* Protected Routes (with Demo Fallback) */}
         <Route path="/" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+          <Layout userRole={userRole} profile={effectiveProfile}>
             <Dashboard userRole={userRole} profile={effectiveProfile} />
           </Layout>
         } />
 
         <Route path="/topics" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+          <Layout userRole={userRole} profile={effectiveProfile}>
             <TopicSelector profile={effectiveProfile} />
           </Layout>
         } />
 
         <Route path="/create" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+          <Layout userRole={userRole} profile={effectiveProfile}>
             <ContentEditor userRole={userRole} profile={effectiveProfile} />
           </Layout>
         } />
 
         <Route path="/content/:id" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+          <Layout userRole={userRole} profile={effectiveProfile}>
             <ContentEditor userRole={userRole} profile={effectiveProfile} />
           </Layout>
         } />
 
         <Route path="/clients" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+          <Layout userRole={userRole} profile={effectiveProfile}>
             <ClientsList profile={effectiveProfile} />
           </Layout>
         } />
 
         <Route path="/library" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+          <Layout userRole={userRole} profile={effectiveProfile}>
             <MyLibrary />
           </Layout>
         } />
 
         <Route path="/clients/:id" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+          <Layout userRole={userRole} profile={effectiveProfile}>
             <ClientDetail profile={effectiveProfile} />
           </Layout>
         } />
 
         <Route path="/compliance" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
+          <Layout userRole={userRole} profile={effectiveProfile}>
             <Dashboard userRole={userRole} profile={effectiveProfile} />
           </Layout>
         } />
 
-        <Route path="/changelog" element={
-          <Layout userRole={userRole} profile={effectiveProfile} setRoleOverride={setRoleOverride}>
-            <Changelog />
-          </Layout>
-        } />
+
 
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>

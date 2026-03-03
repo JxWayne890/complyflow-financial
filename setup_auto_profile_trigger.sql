@@ -14,7 +14,7 @@ BEGIN
   VALUES (
     NEW.id,
     v_org_id,
-    'admin', -- Default role for new signups is admin so they can set things up
+    COALESCE((NEW.raw_user_meta_data->>'role'), 'advisor'), 
     SPLIT_PART(NEW.email, '@', 1), -- Default name from email
     NEW.email
   );

@@ -13,7 +13,10 @@ import {
     Linkedin,
     Facebook,
     X,
-    Loader2
+    Loader2,
+    Trash2,
+    CheckSquare,
+    Square
 } from 'lucide-react';
 
 type StatusFilter = 'all' | 'active' | 'onboarding' | 'inactive';
@@ -211,6 +214,29 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
     const [searchQuery, setSearchQuery] = useState('');
     const [filterStatus, setFilterStatus] = useState<StatusFilter>('all');
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+    const toggleSelection = (e: React.MouseEvent, id: string) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) {
+                next.delete(id);
+            } else {
+                next.add(id);
+            }
+            return next;
+        });
+    };
+
+    const toggleSelectAll = () => {
+        if (selectedIds.size === filteredClients.length) {
+            setSelectedIds(new Set());
+        } else {
+            setSelectedIds(new Set(filteredClients.map(c => c.id)));
+        }
+    };
 
     const fetchClients = async () => {
         if (!profile?.org_id) return;
@@ -236,6 +262,56 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
             setClients(transformedClients);
         } catch (error) {
             console.error('Error fetching clients:', error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDeleteClient = async (e: React.MouseEvent, clientId: string, clientName: string) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (!confirm(`Are you sure you want to delete ${clientName}? This will permanently remove all associated content and data.`)) {
+            return;
+        }
+
+        try {
+            const { error } = await supabase
+                .from('clients')
+                .delete()
+                .eq('id', clientId);
+
+            if (error) throw error;
+
+            // Refresh the list
+            setClients(prev => prev.filter(c => c.id !== clientId));
+        } catch (error: any) {
+            console.error('Error deleting client:', error);
+            alert(error.message || 'Failed to delete client');
+        }
+    };
+
+    const handleBulkDelete = async () => {
+        if (selectedIds.size === 0) return;
+
+        if (!confirm(`Are you sure you want to delete ${selectedIds.size} selected clients? This will permanently remove all associated content and data.`)) {
+            return;
+        }
+
+        setLoading(true);
+        try {
+            const { error } = await supabase
+                .from('clients')
+                .delete()
+                .in('id', Array.from(selectedIds));
+
+            if (error) throw error;
+
+            setClients(prev => prev.filter(c => !selectedIds.has(c.id)));
+            setSelectedIds(new Set());
+        } catch (error: any) {
+            console.error('Error in bulk delete:', error);
+            alert(error.message || 'Failed to delete clients');
         } finally {
             setLoading(false);
         }
@@ -345,6 +421,40 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
                 </div>
             </div>
 
+            {/* Bulk Actions Bar */}
+            {selectedIds.size > 0 && (
+                <div className="sticky top-4 z-30 bg-white border border-primary-100 shadow-xl shadow-primary-900/10 rounded-xl p-4 flex items-center justify-between animate-in fade-in slide-in-from-top-4 duration-300">
+                    <div className="flex items-center gap-4">
+                        <button
+                            onClick={toggleSelectAll}
+                            className="text-primary-600 hover:text-primary-700 font-medium text-sm flex items-center gap-2"
+                        >
+                            {selectedIds.size === filteredClients.length ? <CheckSquare size={18} /> : <Square size={18} />}
+                            {selectedIds.size === filteredClients.length ? 'Deselect All' : 'Select All Visible'}
+                        </button>
+                        <div className="h-4 w-px bg-slate-200" />
+                        <span className="text-sm font-semibold text-slate-700">
+                            {selectedIds.size} client{selectedIds.size > 1 ? 's' : ''} selected
+                        </span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={() => setSelectedIds(new Set())}
+                            className="px-4 py-2 text-slate-500 hover:text-slate-700 text-sm font-medium"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={handleBulkDelete}
+                            className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm shadow-red-600/20"
+                        >
+                            <Trash2 size={16} />
+                            Delete Selected
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* Client Cards Grid */}
             {filteredClients.length === 0 ? (
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-16 text-center">
@@ -374,11 +484,30 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
                             <Link
                                 key={client.id}
                                 to={`/clients/${client.id}`}
-                                className="group bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-lg hover:border-slate-300 transition-all duration-300"
+                                onClick={(e) => {
+                                    if (selectedIds.size > 0) {
+                                        toggleSelection(e, client.id);
+                                    }
+                                }}
+                                className={`group bg-white rounded-xl shadow-sm border overflow-hidden hover:shadow-lg transition-all duration-300 ${selectedIds.has(client.id)
+                                    ? 'border-primary-500 ring-2 ring-primary-500/20 shadow-md transform scale-[1.01]'
+                                    : 'border-slate-200 hover:border-slate-300'
+                                    }`}
                             >
                                 {/* Card Top */}
-                                <div className="p-5">
-                                    <div className="flex items-start gap-4">
+                                <div className="p-5 relative">
+                                    {/* Selection Overlay */}
+                                    <button
+                                        onClick={(e) => toggleSelection(e, client.id)}
+                                        className={`absolute top-4 left-4 z-10 w-6 h-6 rounded-md border-2 transition-all flex items-center justify-center ${selectedIds.has(client.id)
+                                                ? 'bg-primary-600 border-primary-600 text-white shadow-sm'
+                                                : `bg-white/80 backdrop-blur-sm border-slate-300 text-transparent ${selectedIds.size > 0 ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`
+                                            }`}
+                                    >
+                                        <CheckSquare size={16} />
+                                    </button>
+
+                                    <div className={`flex items-start gap-4 transition-all ${selectedIds.has(client.id) ? 'pl-8' : ''}`}>
                                         {/* Avatar */}
                                         <div className={`flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-sm ${getAvatarColor(client.id)} shadow-sm`}>
                                             {getInitials(client.name)}
@@ -394,7 +523,16 @@ const ClientsList: React.FC<{ profile: Profile | null }> = ({ profile }) => {
                                             </div>
                                         </div>
 
-                                        <ChevronRight size={18} className="text-slate-300 group-hover:text-primary-500 transition-colors flex-shrink-0 mt-1" />
+                                        <div className="flex flex-col items-end gap-2">
+                                            <ChevronRight size={18} className="text-slate-300 group-hover:text-primary-500 transition-colors flex-shrink-0 mt-1" />
+                                            <button
+                                                onClick={(e) => handleDeleteClient(e, client.id, client.name)}
+                                                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                                title="Delete Client"
+                                            >
+                                                <Trash2 size={16} />
+                                            </button>
+                                        </div>
                                     </div>
 
                                     {/* Badges Row */}
