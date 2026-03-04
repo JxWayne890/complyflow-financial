@@ -78,12 +78,21 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
   const fetchDashboardData = async () => {
     setLoading(true);
     try {
-      // 1. Fetch all content_requests for metrics
-      const { data: allRequests, error: reqError } = await supabase
+      const isCompliance = userRole === UserRole.COMPLIANCE;
+
+      // 1. Fetch content_requests for metrics
+      // Compliance users only see submitted/in_review items
+      let query = supabase
         .from('content_requests')
         .select('id, status, updated_at, topic_text, content_type, advisor_id')
         .eq('org_id', profile!.org_id)
         .order('updated_at', { ascending: false });
+
+      if (isCompliance) {
+        query = query.in('status', ['submitted', 'in_review']);
+      }
+
+      const { data: allRequests, error: reqError } = await query;
 
       if (reqError) throw reqError;
 
@@ -95,38 +104,42 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
       setTotalCount(requests.length);
 
       // 2. Recent Activity (last 5 items with their latest version title)
-      const recentReqs = requests.slice(0, 5);
-      if (recentReqs.length > 0) {
-        const reqIds = recentReqs.map(r => r.id);
-        const { data: versions } = await supabase
-          .from('content_versions')
-          .select('request_id, title, version_number')
-          .in('request_id', reqIds)
-          .order('version_number', { ascending: false });
+      // Skip for compliance users — they only see the queue
+      if (!isCompliance) {
+        const recentReqs = requests.slice(0, 5);
+        if (recentReqs.length > 0) {
+          const reqIds = recentReqs.map(r => r.id);
+          const { data: versions } = await supabase
+            .from('content_versions')
+            .select('request_id, title, version_number')
+            .in('request_id', reqIds)
+            .order('version_number', { ascending: false });
 
-        const versionMap: Record<string, string> = {};
-        (versions || []).forEach((v: any) => {
-          if (!versionMap[v.request_id] && v.title) {
-            versionMap[v.request_id] = v.title;
-          }
-        });
+          const versionMap: Record<string, string> = {};
+          (versions || []).forEach((v: any) => {
+            if (!versionMap[v.request_id] && v.title) {
+              versionMap[v.request_id] = v.title;
+            }
+          });
 
-        const items: RecentItem[] = recentReqs.map(r => {
-          const title = versionMap[r.id] || r.topic_text || 'Untitled';
-          return {
-            id: r.id,
-            title,
-            type: getContentTypeLabel(r.content_type),
-            status: r.status as ContentStatus,
-            date: formatRelativeTime(r.updated_at),
-            mode: getGenerationModeLabel(null, title),
-          };
-        });
-        setRecentItems(items);
+          const items: RecentItem[] = recentReqs.map(r => {
+            const title = versionMap[r.id] || r.topic_text || 'Untitled';
+            return {
+              id: r.id,
+              title,
+              type: getContentTypeLabel(r.content_type),
+              status: r.status as ContentStatus,
+              date: formatRelativeTime(r.updated_at),
+              mode: getGenerationModeLabel(null, title),
+            };
+          });
+          setRecentItems(items);
+        }
       }
 
       // 2b. ALL drafts (full list with version titles)
-      if (requests.length > 0) {
+      // Skip for compliance users — they don't create content
+      if (!isCompliance && requests.length > 0) {
         const allReqIds = requests.map(r => r.id);
         const { data: allVersions } = await supabase
           .from('content_versions')
@@ -329,7 +342,7 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
                 </div>
               ) : (
                 complianceQueue.map(item => (
-                  <div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group">
+                  <Link key={item.id} to={`/content/${item.id}`} className="block p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group cursor-pointer">
                     <div className="flex-1 min-w-0 pr-4">
                       <div className="flex items-center gap-2 mb-1">
                         <div className="h-5 w-5 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">
@@ -339,12 +352,12 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
                         <span className="text-xs text-slate-300">•</span>
                         <span className="text-xs text-slate-400">{item.submitted}</span>
                       </div>
-                      <h4 className="text-base font-semibold text-slate-900 truncate">{item.title}</h4>
+                      <h4 className="text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate">{item.title}</h4>
                     </div>
-                    <Link to={`/content/${item.id}`} className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-all">
+                    <span className="p-2 text-slate-400 group-hover:text-primary-600 transition-all">
                       <ArrowRight size={20} />
-                    </Link>
-                  </div>
+                    </span>
+                  </Link>
                 ))
               )}
             </div>
@@ -352,59 +365,61 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
         )}
       </div>
 
-      {/* All My Drafts — Full Width */}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-          <div className="flex items-center gap-2">
-            <FileText size={18} className="text-slate-400" />
-            <h3 className="font-semibold text-slate-900">All My Drafts</h3>
-            <span className="bg-slate-100 text-slate-600 text-xs font-semibold px-2 py-0.5 rounded-full">{allDrafts.length}</span>
+      {/* All My Drafts — Full Width (hidden for Compliance) */}
+      {userRole !== UserRole.COMPLIANCE && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+            <div className="flex items-center gap-2">
+              <FileText size={18} className="text-slate-400" />
+              <h3 className="font-semibold text-slate-900">All My Drafts</h3>
+              <span className="bg-slate-100 text-slate-600 text-xs font-semibold px-2 py-0.5 rounded-full">{allDrafts.length}</span>
+            </div>
+            <Link to="/library" className="text-sm font-medium text-primary-600 hover:text-primary-700">Open Library</Link>
           </div>
-          <Link to="/library" className="text-sm font-medium text-primary-600 hover:text-primary-700">Open Library</Link>
+          {allDrafts.length === 0 ? (
+            <div className="p-12 text-center">
+              <FileText size={48} className="mx-auto text-slate-200 mb-3" />
+              <p className="text-slate-500 font-medium">No drafts yet</p>
+              <p className="text-sm text-slate-400 mb-4">Content you create will appear here.</p>
+              <Link to="/topics" className="inline-flex items-center gap-2 text-primary-600 hover:text-primary-700 font-medium text-sm">
+                <Plus size={16} />
+                Create your first draft
+              </Link>
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {allDrafts.map(item => (
+                <div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group">
+                  <div className="flex-1 min-w-0 pr-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs font-medium text-slate-500">{item.type}</span>
+                      <span className="text-xs text-slate-300">•</span>
+                      <span className="text-xs text-slate-400">{item.date}</span>
+                    </div>
+                    <Link to={`/content/${item.id}`} className="block text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate">
+                      {item.title}
+                    </Link>
+                    <div className="mt-1">
+                      <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${item.mode === 'Visual' ? 'bg-purple-50 text-purple-600 border border-purple-100' :
+                        item.mode === 'Full Article' ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' :
+                          'bg-slate-50 text-slate-600 border border-slate-100'
+                        }`}>
+                        {item.mode}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <StatusBadge status={item.status} />
+                    <Link to={`/content/${item.id}`} className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-all opacity-0 group-hover:opacity-100">
+                      <ArrowRight size={18} />
+                    </Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        {allDrafts.length === 0 ? (
-          <div className="p-12 text-center">
-            <FileText size={48} className="mx-auto text-slate-200 mb-3" />
-            <p className="text-slate-500 font-medium">No drafts yet</p>
-            <p className="text-sm text-slate-400 mb-4">Content you create will appear here.</p>
-            <Link to="/topics" className="inline-flex items-center gap-2 text-primary-600 hover:text-primary-700 font-medium text-sm">
-              <Plus size={16} />
-              Create your first draft
-            </Link>
-          </div>
-        ) : (
-          <div className="divide-y divide-slate-100">
-            {allDrafts.map(item => (
-              <div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex justify-between items-center group">
-                <div className="flex-1 min-w-0 pr-4">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs font-medium text-slate-500">{item.type}</span>
-                    <span className="text-xs text-slate-300">•</span>
-                    <span className="text-xs text-slate-400">{item.date}</span>
-                  </div>
-                  <Link to={`/content/${item.id}`} className="block text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate">
-                    {item.title}
-                  </Link>
-                  <div className="mt-1">
-                    <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${item.mode === 'Visual' ? 'bg-purple-50 text-purple-600 border border-purple-100' :
-                      item.mode === 'Full Article' ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' :
-                        'bg-slate-50 text-slate-600 border border-slate-100'
-                      }`}>
-                      {item.mode}
-                    </span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <StatusBadge status={item.status} />
-                  <Link to={`/content/${item.id}`} className="p-2 text-slate-400 hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-all opacity-0 group-hover:opacity-100">
-                    <ArrowRight size={18} />
-                  </Link>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 };

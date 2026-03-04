@@ -15,7 +15,7 @@ BEGIN
     NEW.id,
     v_org_id,
     COALESCE((NEW.raw_user_meta_data->>'role'), 'advisor'), 
-    SPLIT_PART(NEW.email, '@', 1), -- Default name from email
+    COALESCE((NEW.raw_user_meta_data->>'full_name'), SPLIT_PART(NEW.email, '@', 1)), 
     NEW.email
   );
 

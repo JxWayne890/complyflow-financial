@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
 import { triggerContentGeneration, supabase } from '../services/supabaseClient';
-import { UserRole, ContentStatus, ContentVersion, ComplianceReview, Profile, Client } from '../types';
+import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
   Wand2,
@@ -60,6 +60,8 @@ const EXTENSION_STEPS = [
   { id: 2, label: 'Writing New Sections', icon: PenTool, duration: 8000 },
   { id: 3, label: 'Seamlessly Integrating', icon: FileCheck, duration: 3000 },
 ];
+const NO_EM_DASH_INSTRUCTION =
+  'Do not use em dashes (—), en dashes (–), or HTML dash entities (&mdash; or &ndash;). Use standard hyphen (-) or other punctuation instead.';
 
 interface ContentEditorProps {
   userRole: UserRole;
@@ -112,17 +114,97 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [content, setContent] = useState<ContentVersion | null>(null);
   const [status, setStatus] = useState<ContentStatus>(ContentStatus.DRAFT);
   const [reviews, setReviews] = useState<ComplianceReview[]>([]);
+  const [complianceHighlights, setComplianceHighlights] = useState<ComplianceHighlight[]>([]);
+  const [updatingHighlightId, setUpdatingHighlightId] = useState<string | null>(null);
   const [isLoadingRequest, setIsLoadingRequest] = useState(false);
   const [showComplianceModal, setShowComplianceModal] = useState(false);
   const [selectedReviewer, setSelectedReviewer] = useState<string | null>(null);
 
-  const complianceTeam = [
-    { id: '1', name: 'Sarah Jenkins', role: 'Senior Compliance Officer', avatar: 'SJ', email: 'sarah.j@complyflow.com' },
-    { id: '2', name: 'Michael Chen', role: 'Regulatory Associate', avatar: 'MC', email: 'm.chen@complyflow.com' },
-    { id: '3', name: 'Emma Williams', role: 'Compliance Director', avatar: 'EW', email: 'emma.w@complyflow.com' },
-    { id: '4', name: 'David Thompson', role: 'Compliance Lead', avatar: 'DT', email: 'd.thompson@complyflow.com' },
-  ];
+  const [complianceTeam, setComplianceTeam] = useState<{ id: string; name: string; email: string }[]>([]);
+  const [complianceLoading, setComplianceLoading] = useState(false);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
+
+  // Resizable Notes Panel State
+  const MIN_NOTES_WIDTH = 250;
+  const MAX_NOTES_WIDTH = 600;
+  const DEFAULT_NOTES_WIDTH = 380;
+  const [notesWidth, setNotesWidth] = useState(DEFAULT_NOTES_WIDTH);
+  const [isResizingNotes, setIsResizingNotes] = useState(false);
+
+  const startResizingNotes = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizingNotes(true);
+  }, []);
+
+  const stopResizingNotes = useCallback(() => {
+    setIsResizingNotes(false);
+  }, []);
+
+  const resizeNotes = useCallback((e: MouseEvent) => {
+    if (isResizingNotes) {
+      // Calculate width inversely or directly based on layout. 
+      // Assuming it's on the left side, width is just the mouse X position
+      // minus whatever the left sidebar width is.
+      // But it's easier to use movementX or just bounding client rect.
+      // For simplicity, let's just use movement.
+
+      const newWidth = e.clientX - 288; // rough offset of the main sidebar. We'll fine tune this.
+      // Better approach: use getBoundingClientRect on a ref if needed, but since it's flush left after sidebar:
+      // We can just rely on the mouse position minus sidebar width if sidebar is fixed,
+      // But since sidebar is ALSO resizable now, this will break if we hardcode 288.
+
+      // Let's use a ref to the panel itself to get its left position.
+    }
+  }, [isResizingNotes]);
+
+  // We need a safer way to resize that doesn't depend on the absolute X position 
+  // since the main layout sidebar can change widths.
+  // Using movementX is safer.
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizingNotes) return;
+      setNotesWidth(prev => {
+        const newWidth = prev + e.movementX;
+        return Math.min(Math.max(newWidth, MIN_NOTES_WIDTH), MAX_NOTES_WIDTH);
+      });
+    };
+
+    if (isResizingNotes) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', stopResizingNotes);
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', stopResizingNotes);
+    };
+  }, [isResizingNotes, stopResizingNotes]);
+
+
+  const fetchComplianceTeam = useCallback(async () => {
+    if (!profile?.org_id) return;
+    setComplianceLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, name, email')
+        .eq('org_id', profile.org_id)
+        .eq('role', 'compliance');
+      if (error) throw error;
+      setComplianceTeam(data || []);
+    } catch (err) {
+      console.error('Failed to fetch compliance team:', err);
+      setComplianceTeam([]);
+    } finally {
+      setComplianceLoading(false);
+    }
+  }, [profile?.org_id]);
+
+  useEffect(() => {
+    if (showComplianceModal) {
+      fetchComplianceTeam();
+    }
+  }, [showComplianceModal, fetchComplianceTeam]);
 
   const loadRequestData = useCallback(async (requestIdToLoad: string) => {
     setIsLoadingRequest(true);
@@ -161,9 +243,23 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       if (reviewError) throw reviewError;
       setReviews((reviewData || []) as ComplianceReview[]);
+
+      const { data: highlightData, error: highlightError } = await supabase
+        .from('compliance_highlights')
+        .select('id, org_id, request_id, version_id, highlight_id, selected_text, note, status, created_by, resolved_by, resolved_at, created_at')
+        .eq('request_id', requestIdToLoad)
+        .order('created_at', { ascending: false });
+
+      if (highlightError) throw highlightError;
+      setComplianceHighlights((highlightData || []) as ComplianceHighlight[]);
     } catch (e: any) {
       console.error("Failed to load content request:", e);
-      setError(e.message || 'Failed to load content request.');
+      if (e?.code === '42P01') {
+        setComplianceHighlights([]);
+        setError('`compliance_highlights` table is missing. Run the new migration before using inline compliance notes.');
+      } else {
+        setError(e.message || 'Failed to load content request.');
+      }
     } finally {
       setIsLoadingRequest(false);
     }
@@ -232,6 +328,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       };
     }
   }, [isExtending]);
+
+  const canAddComplianceHighlights =
+    (userRole === UserRole.COMPLIANCE || userRole === UserRole.ADMIN)
+    && [ContentStatus.SUBMITTED, ContentStatus.IN_REVIEW, ContentStatus.CHANGES_REQUESTED].includes(status);
+
+  const canResolveComplianceHighlights =
+    (userRole === UserRole.ADVISOR || userRole === UserRole.COMPLIANCE || userRole === UserRole.ADMIN);
 
   const ensureRequestId = async (): Promise<string> => {
     if (!profile?.id || !profile?.org_id) {
@@ -302,6 +405,19 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     disclaimers?: string;
     chart_data?: any;
   }) => {
+    const sanitizeNoEmDashes = (input: string | null | undefined): string => {
+      if (!input) return '';
+      return input
+        .replace(/&(m|n)dash;/gi, '-')
+        .replace(/&#821[12];/g, '-')
+        .replace(/&#x201[34];?/gi, '-')
+        .replace(/[—–]/g, '-');
+    };
+
+    const sanitizedTitle = sanitizeNoEmDashes(payload.title);
+    const sanitizedBody = sanitizeNoEmDashes(payload.body);
+    const sanitizedDisclaimers = sanitizeNoEmDashes(payload.disclaimers);
+
     const nextVersion = (content?.version_number || 0) + 1;
     const { data: versionData, error: versionError } = await supabase
       .from('content_versions')
@@ -309,9 +425,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         request_id: targetRequestId,
         version_number: nextVersion,
         generated_by: payload.generated_by,
-        title: payload.title,
-        body: payload.body,
-        disclaimers: payload.disclaimers || null,
+        title: sanitizedTitle,
+        body: sanitizedBody,
+        disclaimers: sanitizedDisclaimers || null,
         chart_data: payload.chart_data || null,
       })
       .select('*')
@@ -459,6 +575,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     } else if (contentType === 'Video Script') {
       finalInstructions += " Use a two-column script format (Visual | Audio).";
     }
+    finalInstructions += ` ${NO_EM_DASH_INSTRUCTION}`;
 
     try {
       const currentRequestId = await ensureRequestId();
@@ -875,7 +992,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
   const stripIframeEditorInjection = useCallback((html: string): string => {
     if (!html) return '';
-    return html.replace(/<!-- CF_IFRAME_EDIT_BRIDGE_START -->[\s\S]*?<!-- CF_IFRAME_EDIT_BRIDGE_END -->/g, '');
+    try {
+      const hasDoctype = /<!doctype html>/i.test(html);
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      doc.getElementById('cf-iframe-edit-style')?.remove();
+      doc.getElementById('cf-iframe-edit-script')?.remove();
+      doc.getElementById('cfIframePill')?.remove();
+      const cleaned = doc.documentElement.outerHTML;
+      return hasDoctype ? `<!DOCTYPE html>\n${cleaned}` : cleaned;
+    } catch {
+      return html
+        .replace(/<!-- CF_IFRAME_EDIT_BRIDGE_START -->[\s\S]*?<!-- CF_IFRAME_EDIT_BRIDGE_END -->/gi, '')
+        .replace(/<style[^>]*id=["']cf-iframe-edit-style["'][\s\S]*?<\/style>/gi, '')
+        .replace(/<script[^>]*id=["']cf-iframe-edit-script["'][\s\S]*?<\/script>/gi, '')
+        .replace(/<div[^>]*id=["']cfIframePill["'][\s\S]*?<\/div>/gi, '');
+    }
   }, []);
 
   const injectIframeEditorBridge = useCallback((html: string): string => {
@@ -929,8 +1060,18 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     gap: 6px;
     margin-left: 4px;
   }
+  .cf-pill .cf-prompt {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    margin-left: 4px;
+  }
   .cf-pill.cf-note-open .cf-note { display: inline-flex; }
+  .cf-pill.cf-prompt-open .cf-prompt { display: inline-flex; }
+  .cf-pill.cf-highlight-open .cf-highlight-note { display: inline-flex; }
   .cf-pill.cf-note-open #cfComplianceToggle { display: none; }
+  .cf-pill.cf-prompt-open #cfPromptToggle { display: none; }
+  .cf-pill.cf-highlight-open #cfHighlightToggle { display: none; }
   .cf-pill .cf-note input {
     width: 190px;
     border: 1px solid #475569;
@@ -942,16 +1083,81 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     outline: none;
   }
   .cf-pill .cf-note input:focus { border-color: #64748b; }
+  .cf-pill .cf-highlight-note {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    margin-left: 4px;
+  }
+  .cf-pill .cf-highlight-note input {
+    width: 250px;
+    border: 1px solid #475569;
+    border-radius: 8px;
+    background: #1e293b;
+    color: #f8fafc;
+    padding: 6px 8px;
+    font-size: 12px;
+    outline: none;
+  }
+  .cf-pill .cf-highlight-note input:focus { border-color: #64748b; }
+  .cf-pill .cf-prompt textarea {
+    width: 280px;
+    min-height: 44px;
+    max-height: 120px;
+    resize: vertical;
+    border: 1px solid #475569;
+    border-radius: 8px;
+    background: #1e293b;
+    color: #f8fafc;
+    padding: 8px;
+    font-size: 12px;
+    line-height: 1.35;
+    outline: none;
+  }
+  .cf-pill .cf-prompt textarea:focus { border-color: #64748b; }
+  .cf-manual-edit-target {
+    outline: 2px solid #334155;
+    outline-offset: 2px;
+    border-radius: 4px;
+    background: rgba(15, 23, 42, 0.06);
+  }
+  .cf-compliance-highlight {
+    background: rgba(245, 158, 11, 0.3);
+    border-bottom: 2px solid rgba(245, 158, 11, 0.9);
+    border-radius: 3px;
+    padding: 0 1px;
+  }
+  .cf-compliance-highlight[data-cf-highlight-status="resolved"] {
+    background: rgba(148, 163, 184, 0.22);
+    border-bottom-color: rgba(100, 116, 139, 0.85);
+  }
+  .cf-compliance-highlight.cf-focus-ring {
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.45);
+    transition: box-shadow 200ms ease;
+  }
 </style>
 <div id="cfIframePill" class="cf-pill" role="toolbar" aria-label="Select and fix toolbar">
   <button type="button" data-mode="rewrite">Rewrite</button>
   <button type="button" data-mode="shorten">Shorten</button>
   <button type="button" data-mode="expand">Expand</button>
+  <button type="button" id="cfManualToggle">Edit Text Manually</button>
+  <button type="button" id="cfPromptToggle">Prompt AI</button>
   <div class="cf-divider"></div>
   <button type="button" id="cfComplianceToggle">Fix Compliance</button>
   <form class="cf-note" id="cfComplianceForm">
     <input type="text" id="cfComplianceInput" placeholder="Compliance note..." />
     <button type="submit">Fix</button>
+  </form>
+  ${canAddComplianceHighlights ? `
+  <button type="button" id="cfHighlightToggle">Add Note</button>
+  <form class="cf-highlight-note" id="cfHighlightForm">
+    <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
+    <button type="submit">Save</button>
+  </form>
+  ` : ''}
+  <form class="cf-prompt" id="cfPromptForm">
+    <textarea id="cfPromptInput" placeholder="Tell AI exactly what to change in this selected text only..."></textarea>
+    <button type="submit">Run</button>
   </form>
 </div>
 <!-- CF_IFRAME_EDIT_BRIDGE_END -->
@@ -962,7 +1168,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
 
     return `${cleanedHtml}${bridgeBlock}`;
-  }, [stripIframeEditorInjection]);
+  }, [canAddComplianceHighlights, stripIframeEditorInjection]);
 
   useEffect(() => {
     if (!content?.body || !content.body.includes('<!DOCTYPE html>')) {
@@ -1004,12 +1210,20 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const normalizeRewriteText = useCallback((input: string): string => {
     if (!input) return '';
     const doc = new DOMParser().parseFromString(input, 'text/html');
-    const parsedText = doc.body.textContent?.replace(/\s+/g, ' ').trim() || '';
+    const parsedText = doc.body.textContent
+      ?.replace(/&(m|n)dash;/gi, '-')
+      .replace(/&#821[12];/g, '-')
+      .replace(/&#x201[34];?/gi, '-')
+      .replace(/[—–]/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim() || '';
     return parsedText;
   }, []);
 
   const mainIframeRuntimeCleanupRef = useRef<(() => void) | null>(null);
   const fullscreenIframeRuntimeCleanupRef = useRef<(() => void) | null>(null);
+  const mainBindRetryTimeoutsRef = useRef<number[]>([]);
+  const fullscreenBindRetryTimeoutsRef = useRef<number[]>([]);
   const pendingScrollRestoreRef = useRef<{
     main: { x: number; y: number } | null;
     fullscreen: { x: number; y: number } | null;
@@ -1039,17 +1253,175 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       cleanupRef.current = null;
     }
 
-    const pill = frameDocument.getElementById('cfIframePill') as HTMLDivElement | null;
+    const ensureBridgeNodes = () => {
+      const pillStyles = `
+          .cf-pill {
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 2147483646;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            padding: 6px;
+            border-radius: 999px;
+            background: #0f172a;
+            border: 1px solid #334155;
+            box-shadow: 0 10px 24px rgba(2, 6, 23, 0.35);
+            color: #e2e8f0;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+            user-select: none;
+          }
+          .cf-pill.cf-visible { display: inline-flex; }
+          .cf-pill button {
+            border: 0;
+            border-radius: 999px;
+            padding: 7px 12px;
+            background: transparent;
+            color: #e2e8f0;
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 120ms ease;
+          }
+          .cf-pill button:hover { background: #334155; }
+          .cf-pill button:disabled { opacity: 0.6; cursor: wait; }
+          .cf-pill .cf-divider { width: 1px; height: 20px; background: #475569; }
+          .cf-pill .cf-note { display: none; align-items: center; gap: 6px; margin-left: 4px; }
+          .cf-pill .cf-highlight-note { display: none; align-items: center; gap: 6px; margin-left: 4px; }
+          .cf-pill .cf-prompt { display: none; align-items: center; gap: 6px; margin-left: 4px; }
+          .cf-pill.cf-note-open .cf-note { display: inline-flex; }
+          .cf-pill.cf-highlight-open .cf-highlight-note { display: inline-flex; }
+          .cf-pill.cf-prompt-open .cf-prompt { display: inline-flex; }
+          .cf-pill.cf-note-open #cfComplianceToggle { display: none; }
+          .cf-pill.cf-highlight-open #cfHighlightToggle { display: none; }
+          .cf-pill.cf-prompt-open #cfPromptToggle { display: none; }
+          .cf-pill .cf-note input {
+            width: 190px;
+            border: 1px solid #475569;
+            border-radius: 8px;
+            background: #1e293b;
+            color: #f8fafc;
+            padding: 6px 8px;
+            font-size: 12px;
+            outline: none;
+          }
+          .cf-pill .cf-note input:focus { border-color: #64748b; }
+          .cf-pill .cf-highlight-note input {
+            width: 250px;
+            border: 1px solid #475569;
+            border-radius: 8px;
+            background: #1e293b;
+            color: #f8fafc;
+            padding: 6px 8px;
+            font-size: 12px;
+            outline: none;
+          }
+          .cf-pill .cf-highlight-note input:focus { border-color: #64748b; }
+          .cf-pill .cf-prompt textarea {
+            width: 280px;
+            min-height: 44px;
+            max-height: 120px;
+            resize: vertical;
+            border: 1px solid #475569;
+            border-radius: 8px;
+            background: #1e293b;
+            color: #f8fafc;
+            padding: 8px;
+            font-size: 12px;
+            line-height: 1.35;
+            outline: none;
+          }
+          .cf-pill .cf-prompt textarea:focus { border-color: #64748b; }
+          .cf-manual-edit-target {
+            outline: 2px solid #334155;
+            outline-offset: 2px;
+            border-radius: 4px;
+            background: rgba(15, 23, 42, 0.06);
+          }
+          .cf-compliance-highlight {
+            background: rgba(245, 158, 11, 0.3);
+            border-bottom: 2px solid rgba(245, 158, 11, 0.9);
+            border-radius: 3px;
+            padding: 0 1px;
+          }
+          .cf-compliance-highlight[data-cf-highlight-status="resolved"] {
+            background: rgba(148, 163, 184, 0.22);
+            border-bottom-color: rgba(100, 116, 139, 0.85);
+          }
+          .cf-compliance-highlight.cf-focus-ring {
+            box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.45);
+            transition: box-shadow 200ms ease;
+          }
+      `;
+      const pillMarkup = `
+          <button type="button" data-mode="rewrite">Rewrite</button>
+          <button type="button" data-mode="shorten">Shorten</button>
+          <button type="button" data-mode="expand">Expand</button>
+          <button type="button" id="cfManualToggle">Edit Text Manually</button>
+          <button type="button" id="cfPromptToggle">Prompt AI</button>
+          <div class="cf-divider"></div>
+          <button type="button" id="cfComplianceToggle">Fix Compliance</button>
+          <form class="cf-note" id="cfComplianceForm">
+            <input type="text" id="cfComplianceInput" placeholder="Compliance note..." />
+            <button type="submit">Fix</button>
+          </form>
+          ${canAddComplianceHighlights ? `
+          <button type="button" id="cfHighlightToggle">Add Note</button>
+          <form class="cf-highlight-note" id="cfHighlightForm">
+            <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
+            <button type="submit">Save</button>
+          </form>
+          ` : ''}
+          <form class="cf-prompt" id="cfPromptForm">
+            <textarea id="cfPromptInput" placeholder="Tell AI exactly what to change in this selected text only..."></textarea>
+            <button type="submit">Run</button>
+          </form>
+      `.trim();
+
+      let styleElement = frameDocument.getElementById('cf-iframe-edit-style') as HTMLStyleElement | null;
+      if (!styleElement) {
+        styleElement = frameDocument.createElement('style');
+        styleElement.id = 'cf-iframe-edit-style';
+        (frameDocument.head || frameDocument.body || frameDocument.documentElement).appendChild(styleElement);
+      }
+      styleElement.textContent = pillStyles;
+
+      let pillElement = frameDocument.getElementById('cfIframePill') as HTMLDivElement | null;
+      if (!pillElement) {
+        pillElement = frameDocument.createElement('div');
+        pillElement.id = 'cfIframePill';
+        pillElement.className = 'cf-pill';
+        pillElement.setAttribute('role', 'toolbar');
+        pillElement.setAttribute('aria-label', 'Select and fix toolbar');
+        (frameDocument.body || frameDocument.documentElement).appendChild(pillElement);
+      }
+      pillElement.innerHTML = pillMarkup;
+
+      return pillElement;
+    };
+
+    const pill = ensureBridgeNodes();
     if (!pill) return;
 
     const complianceToggle = frameDocument.getElementById('cfComplianceToggle') as HTMLButtonElement | null;
     const complianceForm = frameDocument.getElementById('cfComplianceForm') as HTMLFormElement | null;
     const complianceInput = frameDocument.getElementById('cfComplianceInput') as HTMLInputElement | null;
+    const highlightToggle = frameDocument.getElementById('cfHighlightToggle') as HTMLButtonElement | null;
+    const highlightForm = frameDocument.getElementById('cfHighlightForm') as HTMLFormElement | null;
+    const highlightInput = frameDocument.getElementById('cfHighlightInput') as HTMLInputElement | null;
+    const manualToggle = frameDocument.getElementById('cfManualToggle') as HTMLButtonElement | null;
+    const promptToggle = frameDocument.getElementById('cfPromptToggle') as HTMLButtonElement | null;
+    const promptForm = frameDocument.getElementById('cfPromptForm') as HTMLFormElement | null;
+    const promptInput = frameDocument.getElementById('cfPromptInput') as HTMLTextAreaElement | null;
     const actionButtons = Array.from(pill.querySelectorAll<HTMLButtonElement>('button[data-mode]'));
 
     let savedRange: Range | null = null;
     let selectedText = '';
     let isBusy = false;
+    let manualEditTarget: HTMLSpanElement | null = null;
+    let manualOriginalText = '';
     let selectionRafId: number | null = null;
     const timeoutIds: number[] = [];
     const unbindFns: Array<() => void> = [];
@@ -1066,9 +1438,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
     const hidePill = (force = false) => {
       if (isBusy && !force) return;
-      pill.classList.remove('cf-visible', 'cf-note-open');
+      pill.classList.remove('cf-visible', 'cf-note-open', 'cf-highlight-open', 'cf-prompt-open');
       if (complianceInput) {
         complianceInput.value = '';
+      }
+      if (highlightInput) {
+        highlightInput.value = '';
+      }
+      if (promptInput) {
+        promptInput.value = '';
       }
       savedRange = null;
       selectedText = '';
@@ -1082,6 +1460,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       });
       if (complianceInput) {
         complianceInput.disabled = nextBusy;
+      }
+      if (highlightInput) {
+        highlightInput.disabled = nextBusy;
+      }
+      if (promptInput) {
+        promptInput.disabled = nextBusy;
       }
     };
 
@@ -1197,15 +1581,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       return insertedTextNode;
     };
 
-    const saveIframeHtml = async () => {
+    const saveIframeHtml = async (): Promise<ContentVersion | null> => {
       const currentRequestId = latestRequestIdRef.current;
       const currentContent = latestContentRef.current;
-      if (!currentRequestId || !currentContent) return;
+      if (!currentRequestId || !currentContent) return null;
 
       const updatedRawHtml = `<!DOCTYPE html>\n${frameDocument.documentElement.outerHTML}`;
       const cleanedHtml = stripIframeEditorInjection(updatedRawHtml);
       const currentBody = stripIframeEditorInjection(currentContent.body || '');
-      if (!cleanedHtml || cleanedHtml === currentBody) return;
+      if (!cleanedHtml || cleanedHtml === currentBody) return currentContent;
 
       const savedVersion = await createContentVersion(currentRequestId, {
         generated_by: 'human',
@@ -1220,6 +1604,74 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         y: frameWindow.scrollY ?? scrollingElement.scrollTop ?? 0,
       };
       setContent(savedVersion);
+      return savedVersion;
+    };
+
+    const createComplianceHighlight = async (noteText: string) => {
+      if (isBusy || !savedRange || !selectedText || !profile?.id || !profile?.org_id) return;
+      const currentRequestId = latestRequestIdRef.current;
+      const currentContent = latestContentRef.current;
+      if (!currentRequestId || !currentContent) return;
+
+      const note = noteText.trim();
+      if (!note) return;
+
+      setBusyState(true);
+      try {
+        const selection = frameWindow.getSelection();
+        if (!selection) return;
+
+        selection.removeAllRanges();
+        selection.addRange(savedRange);
+        const activeRange = selection.getRangeAt(0);
+        const fragment = activeRange.extractContents();
+        const extractedText = fragment.textContent?.replace(/\s+/g, ' ').trim() || selectedText;
+        if (!extractedText) {
+          hidePill(true);
+          return;
+        }
+
+        const highlightId = (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+        const highlightNode = frameDocument.createElement('span');
+        highlightNode.className = 'cf-compliance-highlight';
+        highlightNode.setAttribute('data-cf-highlight-id', highlightId);
+        highlightNode.setAttribute('data-cf-highlight-status', 'open');
+        highlightNode.appendChild(fragment);
+        activeRange.insertNode(highlightNode);
+        highlightNode.parentElement?.normalize();
+
+        const focusRange = frameDocument.createRange();
+        focusRange.selectNodeContents(highlightNode);
+        selection.removeAllRanges();
+        selection.addRange(focusRange);
+
+        hidePill(true);
+        const savedVersion = await saveIframeHtml();
+        const targetVersionId = savedVersion?.id || currentContent.id;
+
+        const { data: insertedHighlight, error: insertHighlightError } = await supabase
+          .from('compliance_highlights')
+          .insert({
+            org_id: profile.org_id,
+            request_id: currentRequestId,
+            version_id: targetVersionId,
+            highlight_id: highlightId,
+            selected_text: extractedText,
+            note,
+            status: 'open',
+            created_by: profile.id,
+          })
+          .select('id, org_id, request_id, version_id, highlight_id, selected_text, note, status, created_by, resolved_by, resolved_at, created_at')
+          .single();
+
+        if (insertHighlightError) throw insertHighlightError;
+        setComplianceHighlights(prev => [insertedHighlight as ComplianceHighlight, ...prev]);
+      } catch (e: any) {
+        console.error(e);
+        setError(e.message || 'Failed to save compliance highlight.');
+      } finally {
+        setBusyState(false);
+      }
     };
 
     const runRewrite = async (mode: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance', complianceNote?: string) => {
@@ -1232,7 +1684,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         const response: any = await triggerContentGeneration({
           topic: rewriteContext.topic,
           contentType: rewriteContext.contentType,
-          instructions: rewriteContext.instructions,
+          instructions: `${rewriteContext.instructions || ''} ${NO_EM_DASH_INSTRUCTION}`.trim(),
           provider: rewriteContext.textProvider,
           action: 'rewrite',
           currentContent: fallbackText,
@@ -1262,8 +1714,139 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       }
     };
 
+    const runPromptInstruction = async (promptInstruction: string) => {
+      if (isBusy || !savedRange || !selectedText) return;
+      const instructionText = promptInstruction.trim();
+      if (!instructionText) return;
+
+      const fallbackText = selectedText;
+      setBusyState(true);
+      try {
+        const rewriteContext = rewriteContextRef.current;
+        const promptScopedInstructions = [
+          rewriteContext.instructions || '',
+          NO_EM_DASH_INSTRUCTION,
+          'Apply ONLY the user instruction to the selected text. Keep all other wording unchanged.',
+          'Do not add explanations, commentary, or extra content.',
+          `User instruction: ${instructionText}`,
+        ].filter(Boolean).join(' ');
+
+        const response: any = await triggerContentGeneration({
+          topic: rewriteContext.topic,
+          contentType: rewriteContext.contentType,
+          instructions: promptScopedInstructions,
+          provider: rewriteContext.textProvider,
+          action: 'rewrite',
+          currentContent: fallbackText,
+          rewriteMode: 'rewrite',
+        });
+
+        const rawRewrite = response?.data?.body || response?.data?.title || fallbackText;
+        const rewrittenText = normalizeRewriteText(rawRewrite) || fallbackText;
+        const insertedTextNode = replaceSavedRange(rewrittenText);
+        hidePill(true);
+        if (!insertedTextNode) return;
+
+        const root = frameDocument.body || frameDocument.documentElement;
+        const start = getTextOffset(root, insertedTextNode, 0);
+        const end = getTextOffset(root, insertedTextNode, rewrittenText.length);
+        if (start !== null && end !== null) {
+          pendingSelectionRestoreRef.current[runtimeKey] = { start, end };
+        }
+
+        await saveIframeHtml();
+      } catch (e: any) {
+        console.error(e);
+        setError(e.message || 'Failed to apply prompt instruction.');
+      } finally {
+        setBusyState(false);
+      }
+    };
+
+    const finalizeManualEdit = async (saveChanges: boolean) => {
+      if (!manualEditTarget || isBusy) return;
+      const activeTarget = manualEditTarget;
+      manualEditTarget = null;
+      const root = frameDocument.body || frameDocument.documentElement;
+      const normalizedText = normalizeRewriteText(activeTarget.textContent || manualOriginalText || '');
+      const finalText = saveChanges ? (normalizedText || manualOriginalText || '') : (manualOriginalText || '');
+      manualOriginalText = '';
+
+      const parent = activeTarget.parentNode;
+      if (!parent) return;
+      const insertedTextNode = frameDocument.createTextNode(finalText);
+      parent.replaceChild(insertedTextNode, activeTarget);
+      insertedTextNode.parentElement?.normalize();
+
+      if (!saveChanges) return;
+
+      const start = getTextOffset(root, insertedTextNode, 0);
+      const end = getTextOffset(root, insertedTextNode, finalText.length);
+      if (start !== null && end !== null) {
+        pendingSelectionRestoreRef.current[runtimeKey] = { start, end };
+      }
+
+      setBusyState(true);
+      try {
+        await saveIframeHtml();
+      } catch (e: any) {
+        console.error(e);
+        setError(e.message || 'Failed to apply manual edit.');
+      } finally {
+        setBusyState(false);
+      }
+    };
+
+    const beginManualEditInPlace = () => {
+      if (isBusy || !savedRange || !selectedText || manualEditTarget) return;
+      const selection = frameWindow.getSelection();
+      if (!selection) return;
+
+      selection.removeAllRanges();
+      selection.addRange(savedRange);
+      const activeRange = selection.getRangeAt(0);
+      activeRange.deleteContents();
+
+      const editableSpan = frameDocument.createElement('span');
+      editableSpan.className = 'cf-manual-edit-target';
+      editableSpan.contentEditable = 'true';
+      editableSpan.spellcheck = true;
+      editableSpan.textContent = selectedText;
+      activeRange.insertNode(editableSpan);
+
+      const editRange = frameDocument.createRange();
+      editRange.selectNodeContents(editableSpan);
+      editRange.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(editRange);
+
+      manualOriginalText = selectedText;
+      manualEditTarget = editableSpan;
+      savedRange = null;
+      selectedText = '';
+      hidePill(true);
+
+      addEvent(editableSpan, 'blur', () => {
+        void finalizeManualEdit(true);
+      });
+      addEvent(editableSpan, 'keydown', (event: Event) => {
+        const keyEvent = event as KeyboardEvent;
+        if (keyEvent.key === 'Escape') {
+          keyEvent.preventDefault();
+          void finalizeManualEdit(false);
+          return;
+        }
+        if (keyEvent.key === 'Enter' && !keyEvent.shiftKey) {
+          keyEvent.preventDefault();
+          void finalizeManualEdit(true);
+        }
+      });
+      editableSpan.focus();
+    };
+
     const captureSelection = () => {
       if (isBusy) return;
+      if (manualEditTarget) return;
       const activeElement = frameDocument.activeElement;
       if (activeElement && pill.contains(activeElement)) return;
 
@@ -1287,6 +1870,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       selectedText = text;
       savedRange = range.cloneRange();
+      pill.classList.remove('cf-note-open', 'cf-highlight-open', 'cf-prompt-open');
+      if (complianceInput) complianceInput.value = '';
+      if (highlightInput) highlightInput.value = '';
+      if (promptInput) promptInput.value = '';
       positionPill(savedRange);
     };
 
@@ -1312,7 +1899,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     if (complianceToggle) {
       addEvent(complianceToggle, 'click', (event: Event) => {
         event.preventDefault();
+        pill.classList.remove('cf-highlight-open');
+        pill.classList.remove('cf-prompt-open');
         pill.classList.add('cf-note-open');
+        if (savedRange) {
+          positionPill(savedRange);
+        }
         complianceInput?.focus();
       });
     }
@@ -1326,10 +1918,68 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       });
     }
 
+    if (highlightToggle) {
+      addEvent(highlightToggle, 'click', (event: Event) => {
+        event.preventDefault();
+        pill.classList.remove('cf-note-open', 'cf-prompt-open');
+        pill.classList.add('cf-highlight-open');
+        if (savedRange) {
+          positionPill(savedRange);
+        }
+        highlightInput?.focus();
+      });
+    }
+
+    if (highlightForm) {
+      addEvent(highlightForm, 'submit', (event: Event) => {
+        event.preventDefault();
+        const note = highlightInput?.value?.trim() || '';
+        if (!note) return;
+        void createComplianceHighlight(note);
+      });
+    }
+
+    if (manualToggle) {
+      addEvent(manualToggle, 'click', (event: Event) => {
+        event.preventDefault();
+        beginManualEditInPlace();
+      });
+    }
+
+    if (promptToggle) {
+      addEvent(promptToggle, 'click', (event: Event) => {
+        event.preventDefault();
+        pill.classList.remove('cf-note-open', 'cf-highlight-open');
+        pill.classList.add('cf-prompt-open');
+        if (savedRange) {
+          positionPill(savedRange);
+        }
+        promptInput?.focus();
+      });
+    }
+
+    if (promptForm) {
+      addEvent(promptForm, 'submit', (event: Event) => {
+        event.preventDefault();
+        const promptText = promptInput?.value || '';
+        void runPromptInstruction(promptText);
+      });
+      if (promptInput) {
+        addEvent(promptInput, 'keydown', (event: Event) => {
+          const keyEvent = event as KeyboardEvent;
+          if (keyEvent.key === 'Enter' && !keyEvent.shiftKey) {
+            keyEvent.preventDefault();
+            const promptText = promptInput.value || '';
+            void runPromptInstruction(promptText);
+          }
+        });
+      }
+    }
+
     addEvent(pill, 'mousedown', (event: Event) => {
       const target = event.target as HTMLElement | null;
       if (!target) return;
-      if (target.tagName !== 'INPUT') {
+      if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
         event.preventDefault();
       }
     });
@@ -1405,22 +2055,68 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       unbindFns.forEach(unbind => unbind());
       hidePill(true);
     };
-  }, [createContentVersion, normalizeRewriteText, stripIframeEditorInjection]);
+  }, [canAddComplianceHighlights, createContentVersion, normalizeRewriteText, profile?.id, profile?.org_id, stripIframeEditorInjection]);
+
+  const syncHighlightStatusInFrame = useCallback((doc: Document | null) => {
+    if (!doc || complianceHighlights.length === 0) return;
+    complianceHighlights.forEach((item) => {
+      const nodes = doc.querySelectorAll<HTMLElement>(`[data-cf-highlight-id="${item.highlight_id}"]`);
+      nodes.forEach((node) => {
+        node.classList.add('cf-compliance-highlight');
+        node.setAttribute('data-cf-highlight-status', item.status || 'open');
+      });
+    });
+  }, [complianceHighlights]);
+
+  const syncHighlightStatusAcrossFrames = useCallback(() => {
+    syncHighlightStatusInFrame(iframeRef.current?.contentDocument || null);
+    syncHighlightStatusInFrame(fullscreenIframeRef.current?.contentDocument || null);
+  }, [syncHighlightStatusInFrame]);
 
   const handleMainIframeLoad = useCallback(() => {
     const frame = iframeRef.current;
     if (!frame) return;
-    bindIframeRuntime(frame, mainIframeRuntimeCleanupRef, 'main');
-  }, [bindIframeRuntime]);
+    mainBindRetryTimeoutsRef.current.forEach(id => window.clearTimeout(id));
+    mainBindRetryTimeoutsRef.current = [];
+
+    const expectedWindow = frame.contentWindow;
+    const attemptBind = () => {
+      if (!iframeRef.current || iframeRef.current.contentWindow !== expectedWindow) return;
+      bindIframeRuntime(iframeRef.current, mainIframeRuntimeCleanupRef, 'main');
+      syncHighlightStatusAcrossFrames();
+    };
+
+    attemptBind();
+    [80, 220, 500].forEach(delay => {
+      const timeoutId = window.setTimeout(attemptBind, delay);
+      mainBindRetryTimeoutsRef.current.push(timeoutId);
+    });
+  }, [bindIframeRuntime, syncHighlightStatusAcrossFrames]);
 
   const handleFullscreenIframeLoad = useCallback(() => {
     const frame = fullscreenIframeRef.current;
     if (!frame) return;
-    bindIframeRuntime(frame, fullscreenIframeRuntimeCleanupRef, 'fullscreen');
-  }, [bindIframeRuntime]);
+    fullscreenBindRetryTimeoutsRef.current.forEach(id => window.clearTimeout(id));
+    fullscreenBindRetryTimeoutsRef.current = [];
+
+    const expectedWindow = frame.contentWindow;
+    const attemptBind = () => {
+      if (!fullscreenIframeRef.current || fullscreenIframeRef.current.contentWindow !== expectedWindow) return;
+      bindIframeRuntime(fullscreenIframeRef.current, fullscreenIframeRuntimeCleanupRef, 'fullscreen');
+      syncHighlightStatusAcrossFrames();
+    };
+
+    attemptBind();
+    [80, 220, 500].forEach(delay => {
+      const timeoutId = window.setTimeout(attemptBind, delay);
+      fullscreenBindRetryTimeoutsRef.current.push(timeoutId);
+    });
+  }, [bindIframeRuntime, syncHighlightStatusAcrossFrames]);
 
   useEffect(() => {
     return () => {
+      mainBindRetryTimeoutsRef.current.forEach(id => window.clearTimeout(id));
+      mainBindRetryTimeoutsRef.current = [];
       if (mainIframeRuntimeCleanupRef.current) {
         mainIframeRuntimeCleanupRef.current();
         mainIframeRuntimeCleanupRef.current = null;
@@ -1430,6 +2126,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
   useEffect(() => {
     if (!showFullPreview) {
+      fullscreenBindRetryTimeoutsRef.current.forEach(id => window.clearTimeout(id));
+      fullscreenBindRetryTimeoutsRef.current = [];
       if (fullscreenIframeRuntimeCleanupRef.current) {
         fullscreenIframeRuntimeCleanupRef.current();
         fullscreenIframeRuntimeCleanupRef.current = null;
@@ -1438,12 +2136,63 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
 
     return () => {
+      fullscreenBindRetryTimeoutsRef.current.forEach(id => window.clearTimeout(id));
+      fullscreenBindRetryTimeoutsRef.current = [];
       if (fullscreenIframeRuntimeCleanupRef.current) {
         fullscreenIframeRuntimeCleanupRef.current();
         fullscreenIframeRuntimeCleanupRef.current = null;
       }
     };
   }, [showFullPreview]);
+
+  useEffect(() => {
+    syncHighlightStatusAcrossFrames();
+  }, [syncHighlightStatusAcrossFrames, stableIframeSrcDoc]);
+
+  const scrollToHighlight = useCallback((highlightId: string) => {
+    const frames = [iframeRef.current, fullscreenIframeRef.current].filter(Boolean) as HTMLIFrameElement[];
+    for (const frame of frames) {
+      const doc = frame.contentDocument;
+      const win = frame.contentWindow;
+      if (!doc || !win) continue;
+      const node = doc.querySelector<HTMLElement>(`[data-cf-highlight-id="${highlightId}"]`);
+      if (!node) continue;
+      node.classList.add('cf-focus-ring');
+      node.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      win.setTimeout(() => node.classList.remove('cf-focus-ring'), 1800);
+      return;
+    }
+  }, []);
+
+  const handleHighlightStatusChange = async (highlight: ComplianceHighlight, nextStatus: 'open' | 'resolved') => {
+    if (!profile?.id) return;
+    try {
+      setUpdatingHighlightId(highlight.id);
+      const payload =
+        nextStatus === 'resolved'
+          ? { status: 'resolved', resolved_by: profile.id, resolved_at: new Date().toISOString() }
+          : { status: 'open', resolved_by: null, resolved_at: null };
+
+      const { error: updateError } = await supabase
+        .from('compliance_highlights')
+        .update(payload)
+        .eq('id', highlight.id);
+
+      if (updateError) throw updateError;
+
+      setComplianceHighlights(prev => prev.map(item => (
+        item.id === highlight.id
+          ? { ...item, status: nextStatus, resolved_by: nextStatus === 'resolved' ? profile.id : null, resolved_at: nextStatus === 'resolved' ? new Date().toISOString() : null }
+          : item
+      )));
+      syncHighlightStatusAcrossFrames();
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || 'Failed to update highlight status.');
+    } finally {
+      setUpdatingHighlightId(null);
+    }
+  };
 
   const handlePublishToPortal = async () => {
     // In a real app, this would open a modal to select clients
@@ -1480,7 +2229,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             </div>
           )}
 
-          {userRole === UserRole.COMPLIANCE && [ContentStatus.SUBMITTED, ContentStatus.IN_REVIEW].includes(status) ? (
+          {userRole === UserRole.COMPLIANCE && [ContentStatus.SUBMITTED, ContentStatus.IN_REVIEW, ContentStatus.APPROVED].includes(status) ? (
             <div className="flex gap-2">
               <button
                 onClick={() => handleComplianceDecision('changes_requested')}
@@ -1494,14 +2243,16 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               >
                 <XCircle size={16} /> Reject
               </button>
-              <button
-                onClick={() => handleComplianceDecision('approved')}
-                className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
-              >
-                <Check size={16} /> Approve
-              </button>
+              {status !== ContentStatus.APPROVED && (
+                <button
+                  onClick={() => handleComplianceDecision('approved')}
+                  className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                >
+                  <Check size={16} /> Approve
+                </button>
+              )}
             </div>
-          ) : (status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED) && userRole === UserRole.ADVISOR ? (
+          ) : (status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED) && (userRole === UserRole.ADVISOR || userRole === UserRole.ADMIN) ? (
             <div className="flex gap-2">
               {/* Only Advisors should see Publish button */}
               <button
@@ -1531,7 +2282,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   Export HTML
                 </button>
               )}
-              {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
+              {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED) && (
                 <>
                   <button
                     onClick={async () => {
@@ -1556,7 +2307,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     disabled={!content}
                     className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
                   >
-                    {status === ContentStatus.CHANGES_REQUESTED ? 'Resubmit for Review' : 'Submit for Review'} <Send size={16} />
+                    {status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED ? 'Resubmit for Review' : 'Submit for Review'} <Send size={16} />
                   </button>
                 </>
               )}
@@ -1601,280 +2352,358 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-0">
+      <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0 relative">
         {/* Left Panel: Controls */}
-        <div className="lg:col-span-4 flex flex-col gap-6 overflow-y-auto pr-1">
-          <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-200">
-            <h3 className="font-display font-semibold text-slate-900 mb-4 flex items-center gap-2">
-              <Wand2 size={18} className="text-primary-500" /> Content Generator
-            </h3>
+        <div
+          className="flex flex-col gap-6 overflow-y-auto pr-4 relative flex-shrink-0"
+          style={{ width: `${notesWidth}px` }}
+        >
+          {/* System Error Message — Visible to Everyone */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm flex items-start gap-2 shadow-sm">
+              <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+              <div>
+                <p className="font-bold">System Error</p>
+                <p>{error}</p>
+              </div>
+            </div>
+          )}
 
-            {/* Error Message */}
-            {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm flex items-start gap-2">
-                <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          {userRole !== UserRole.COMPLIANCE && (
+            <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-200">
+              <h3 className="font-display font-semibold text-slate-900 mb-4 flex items-center gap-2">
+                <Wand2 size={18} className="text-primary-500" /> Content Generator
+              </h3>
+
+              <div className="space-y-5">
                 <div>
-                  <p className="font-semibold">Generation Failed</p>
-                  <p>{error}</p>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-5">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Topic</label>
-                <input
-                  type="text"
-                  className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
-                  value={topic}
-                  onChange={(e) => setTopic(e.target.value)}
-                  placeholder="Enter content topic..."
-                  disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED}
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Generation Mode</label>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    onClick={() => setGenerationMode('text')}
-                    className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'text'
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                      }`}
-                  >
-                    Written Content
-                  </button>
-                  <button
-                    onClick={() => setGenerationMode('image')}
-                    className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'image'
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                      }`}
-                  >
-                    Visual Asset
-                  </button>
-                  <button
-                    onClick={() => setGenerationMode('both')}
-                    className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'both'
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                      }`}
-                  >
-                    Full Article
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
-                  {isVideoScript ? 'Video Length' : 'Length'}
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    onClick={() => setContentLength('Short')}
-                    className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Short'
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                      }`}
-                  >
-                    {isVideoScript ? 'Short (1-3 min)' : 'Short'}
-                  </button>
-                  <button
-                    onClick={() => setContentLength('Medium')}
-                    className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Medium'
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                      }`}
-                  >
-                    {isVideoScript ? 'Medium (~8 min)' : 'Medium'}
-                  </button>
-                  <button
-                    onClick={() => setContentLength('Long')}
-                    className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Long'
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                      }`}
-                  >
-                    {isVideoScript ? 'Long (10+ min)' : 'Long'}
-                  </button>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Topic</label>
+                  <input
+                    type="text"
+                    className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+                    value={topic}
+                    onChange={(e) => setTopic(e.target.value)}
+                    placeholder="Enter content topic..."
+                    disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED}
+                  />
                 </div>
 
-                {/* Sub-duration selector for Video Script + Short */}
-                {isVideoScript && contentLength === 'Short' && (
-                  <div className="mt-3">
-                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Duration (minutes)</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      {([1, 2, 3] as const).map((min) => (
-                        <button
-                          key={min}
-                          onClick={() => setShortDuration(min)}
-                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${shortDuration === min
-                            ? 'bg-blue-600 text-white border-blue-600'
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                            }`}
-                        >
-                          {min} min
-                        </button>
-                      ))}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Generation Mode</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() => setGenerationMode('text')}
+                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'text'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                        }`}
+                    >
+                      Written Content
+                    </button>
+                    <button
+                      onClick={() => setGenerationMode('image')}
+                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'image'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                        }`}
+                    >
+                      Visual Asset
+                    </button>
+                    <button
+                      onClick={() => setGenerationMode('both')}
+                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'both'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                        }`}
+                    >
+                      Full Article
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                    {isVideoScript ? 'Video Length' : 'Length'}
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() => setContentLength('Short')}
+                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Short'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                        }`}
+                    >
+                      {isVideoScript ? 'Short (1-3 min)' : 'Short'}
+                    </button>
+                    <button
+                      onClick={() => setContentLength('Medium')}
+                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Medium'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                        }`}
+                    >
+                      {isVideoScript ? 'Medium (~8 min)' : 'Medium'}
+                    </button>
+                    <button
+                      onClick={() => setContentLength('Long')}
+                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Long'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                        }`}
+                    >
+                      {isVideoScript ? 'Long (10+ min)' : 'Long'}
+                    </button>
+                  </div>
+
+                  {/* Sub-duration selector for Video Script + Short */}
+                  {isVideoScript && contentLength === 'Short' && (
+                    <div className="mt-3">
+                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Duration (minutes)</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {([1, 2, 3] as const).map((min) => (
+                          <button
+                            key={min}
+                            onClick={() => setShortDuration(min)}
+                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${shortDuration === min
+                              ? 'bg-blue-600 text-white border-blue-600'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                              }`}
+                          >
+                            {min} min
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-1">Perfect for YouTube Shorts, Reels & TikTok</p>
                     </div>
-                    <p className="text-[10px] text-slate-400 mt-1">Perfect for YouTube Shorts, Reels & TikTok</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Format</label>
+                  <select
+                    value={contentType}
+                    onChange={(e) => setContentType(e.target.value)}
+                    className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+                    disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED && status !== ContentStatus.APPROVED}
+                  >
+                    <option value="blog">Blog Article</option>
+                    <option value="linkedin">LinkedIn Post</option>
+                    <option value="facebook">Facebook Post</option>
+                    <option value="video_script">Video Script</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Instructions</label>
+                  <textarea
+                    className="w-full p-3 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all h-32 resize-none"
+                    placeholder="E.g. Target audience is retirees. Tone should be reassuring."
+                    value={instructions}
+                    onChange={(e) => setInstructions(e.target.value)}
+                    disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED && status !== ContentStatus.APPROVED}
+                  />
+                </div>
+
+                {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
+                  <div className="space-y-3">
+                    {(generationMode === 'text' || generationMode === 'both') && (
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Text Engine</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => setTextProvider('claude')}
+                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'claude'
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                              }`}
+                          >
+                            Claude
+                          </button>
+                          <button
+                            onClick={() => setTextProvider('kimi')}
+                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'kimi'
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                              }`}
+                          >
+                            Kimi K2.5
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {(generationMode === 'image' || generationMode === 'both' || !!content) && (
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Image Engine</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => setImageProvider('gemini')}
+                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'gemini'
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                              }`}
+                          >
+                            Gemini
+                          </button>
+                          <button
+                            onClick={() => setImageProvider('chatgpt')}
+                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'chatgpt'
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                              }`}
+                          >
+                            ChatGPT
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="mb-6">
+                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Number of Variations</label>
+                      <div className="flex gap-2">
+                        {[1, 2, 3, 4, 5, 6].map((num) => (
+                          <button
+                            key={num}
+                            onClick={() => setVariationCount(num)}
+                            className={`flex-1 py-1.5 rounded-lg text-xs font-medium border transition-all ${variationCount === num
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                              }`}
+                          >
+                            {num}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleGenerate}
+                      disabled={isGenerating || isExtending}
+                      className="w-full py-2.5 bg-slate-900 text-white font-medium rounded-lg hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-70 flex justify-center items-center gap-2"
+                    >
+                      {isGenerating ? (
+                        <>Generating...</>
+                      ) : (
+                        <>Generate Draft</>
+                      )}
+                    </button>
+
+                    {!isGenerating && content && (
+                      <button
+                        onClick={handleExtend}
+                        disabled={isExtending}
+                        className="w-full py-2.5 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-70 flex justify-center items-center gap-2"
+                      >
+                        {isExtending ? (
+                          <>
+                            <Loader2 size={16} className="animate-spin" /> Extending...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles size={16} className="text-violet-600" /> Extend Content
+                          </>
+                        )}
+                      </button>
+                    )}
+
+
                   </div>
                 )}
               </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Format</label>
-                <select
-                  value={contentType}
-                  onChange={(e) => setContentType(e.target.value)}
-                  className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
-                  disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED}
-                >
-                  <option value="blog">Blog Article</option>
-                  <option value="linkedin">LinkedIn Post</option>
-                  <option value="facebook">Facebook Post</option>
-                  <option value="video_script">Video Script</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Instructions</label>
-                <textarea
-                  className="w-full p-3 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all h-32 resize-none"
-                  placeholder="E.g. Target audience is retirees. Tone should be reassuring."
-                  value={instructions}
-                  onChange={(e) => setInstructions(e.target.value)}
-                  disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED}
-                />
-              </div>
-
-              {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
-                <div className="space-y-3">
-                  {(generationMode === 'text' || generationMode === 'both') && (
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Text Engine</label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          onClick={() => setTextProvider('claude')}
-                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'claude'
-                            ? 'bg-slate-900 text-white border-slate-900'
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                            }`}
-                        >
-                          Claude
-                        </button>
-                        <button
-                          onClick={() => setTextProvider('kimi')}
-                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'kimi'
-                            ? 'bg-slate-900 text-white border-slate-900'
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                            }`}
-                        >
-                          Kimi K2.5
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {(generationMode === 'image' || generationMode === 'both' || !!content) && (
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Image Engine</label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          onClick={() => setImageProvider('gemini')}
-                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'gemini'
-                            ? 'bg-slate-900 text-white border-slate-900'
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                            }`}
-                        >
-                          Gemini
-                        </button>
-                        <button
-                          onClick={() => setImageProvider('chatgpt')}
-                          className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'chatgpt'
-                            ? 'bg-slate-900 text-white border-slate-900'
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                            }`}
-                        >
-                          ChatGPT
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="mb-6">
-                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Number of Variations</label>
-                    <div className="flex gap-2">
-                      {[1, 2, 3, 4, 5, 6].map((num) => (
-                        <button
-                          key={num}
-                          onClick={() => setVariationCount(num)}
-                          className={`flex-1 py-1.5 rounded-lg text-xs font-medium border transition-all ${variationCount === num
-                            ? 'bg-slate-900 text-white border-slate-900'
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                            }`}
-                        >
-                          {num}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={handleGenerate}
-                    disabled={isGenerating || isExtending}
-                    className="w-full py-2.5 bg-slate-900 text-white font-medium rounded-lg hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-70 flex justify-center items-center gap-2"
-                  >
-                    {isGenerating ? (
-                      <>Generating...</>
-                    ) : (
-                      <>Generate Draft</>
-                    )}
-                  </button>
-
-                  {!isGenerating && content && (
-                    <button
-                      onClick={handleExtend}
-                      disabled={isExtending}
-                      className="w-full py-2.5 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-70 flex justify-center items-center gap-2"
-                    >
-                      {isExtending ? (
-                        <>
-                          <Loader2 size={16} className="animate-spin" /> Extending...
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles size={16} className="text-violet-600" /> Extend Content
-                        </>
-                      )}
-                    </button>
-                  )}
-
-
-                </div>
-              )}
             </div>
-          </div>
+          )}
 
           {/* Compliance Feedback Card */}
           {reviews.length > 0 && (
-            <div className="bg-amber-50 rounded-xl p-5 border border-amber-100 shadow-sm">
-              <h4 className="font-semibold text-amber-900 text-sm flex items-center gap-2 mb-3">
+            <div className={`rounded-xl p-5 border shadow-sm ${reviews[0].decision === 'approved' ? 'bg-emerald-50 border-emerald-100' : 'bg-amber-50 border-amber-100'}`}>
+              <h4 className={`font-semibold text-sm flex items-center gap-2 mb-3 ${reviews[0].decision === 'approved' ? 'text-emerald-900' : 'text-amber-900'}`}>
                 <MessageSquare size={16} /> Compliance Notes
               </h4>
-              <div className="bg-white/60 p-3 rounded-lg text-sm text-amber-800 mb-2 border border-amber-100/50">
+              <div className={`bg-white/60 p-3 rounded-lg text-sm mb-2 border ${reviews[0].decision === 'approved' ? 'text-emerald-800 border-emerald-100/50' : 'text-amber-800 border-amber-100/50'}`}>
                 "{reviews[0].notes}"
               </div>
               <div className="flex justify-between items-center text-xs mt-3">
-                <span className="text-amber-700 font-medium">Reviewer: Compliance Officer</span>
-                <StatusBadge status={ContentStatus.CHANGES_REQUESTED} />
+                <span className={`font-medium ${reviews[0].decision === 'approved' ? 'text-emerald-700' : 'text-amber-700'}`}>Reviewer: Compliance Officer</span>
+                <StatusBadge status={reviews[0].decision === 'approved' ? ContentStatus.APPROVED : ContentStatus.CHANGES_REQUESTED} />
               </div>
+            </div>
+          )}
+
+          {(complianceHighlights.length > 0 || canAddComplianceHighlights) && (
+            <div className="bg-slate-50 rounded-xl p-5 border border-slate-200 shadow-sm">
+              <h4 className="font-semibold text-slate-900 text-sm flex items-center gap-2 mb-2">
+                <MessageSquare size={16} /> Inline Highlight Notes
+              </h4>
+              <p className="text-xs text-slate-500 mb-3">
+                Compliance can highlight text in the draft and leave exact change notes for advisors.
+              </p>
+
+              {complianceHighlights.length === 0 ? (
+                <div className="text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-3 py-2">
+                  No inline notes yet.
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                  {complianceHighlights.map((item) => (
+                    <div key={item.id} className="bg-white border border-slate-200 rounded-lg p-3">
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className={`text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full ${item.status === 'resolved' ? 'bg-slate-100 text-slate-600' : 'bg-amber-100 text-amber-800'}`}>
+                          {item.status}
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          {new Date(item.created_at).toLocaleString()}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 mb-1">"{item.selected_text}"</p>
+                      <p className="text-sm text-slate-700 leading-relaxed mb-3">{item.note}</p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => scrollToHighlight(item.highlight_id)}
+                          className="text-xs font-medium px-2.5 py-1.5 rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50"
+                        >
+                          Jump to Highlight
+                        </button>
+                        {canResolveComplianceHighlights && (
+                          <button
+                            onClick={() => handleHighlightStatusChange(item, item.status === 'resolved' ? 'open' : 'resolved')}
+                            disabled={updatingHighlightId === item.id}
+                            className={`text-xs font-medium px-2.5 py-1.5 rounded-md border disabled:opacity-60 ${item.status === 'resolved'
+                              ? 'border-slate-300 text-slate-700 hover:bg-slate-50'
+                              : 'border-emerald-300 text-emerald-700 hover:bg-emerald-50'
+                              }`}
+                          >
+                            {updatingHighlightId === item.id
+                              ? 'Saving...'
+                              : item.status === 'resolved'
+                                ? 'Reopen'
+                                : 'Mark Resolved'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
 
         {/* Right Panel: Document Editor */}
-        <div className="lg:col-span-8 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden relative">
+        <div className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden relative min-w-[300px] pl-4">
+          {/* Distinct Visual Drag Handle on the actual square */}
+          <div
+            className="absolute top-0 left-0 w-4 h-full cursor-col-resize flex flex-col items-center justify-center bg-slate-50 hover:bg-slate-100 active:bg-slate-200 z-30 transition-colors border-r border-slate-200 group"
+            onMouseDown={startResizingNotes}
+            title="Drag to resize panels"
+          >
+            <div className="flex flex-col gap-1 items-center justify-center opacity-40 group-hover:opacity-100 transition-opacity">
+              <div className="w-1 h-1 rounded-full bg-slate-400" />
+              <div className="w-1 h-1 rounded-full bg-slate-400" />
+              <div className="w-1 h-1 rounded-full bg-slate-400" />
+              <div className="w-1 h-1 rounded-full bg-slate-400" />
+              <div className="w-1 h-1 rounded-full bg-slate-400" />
+            </div>
+          </div>
+
           {isGenerating ? (
             <div className="flex-1 flex flex-col items-center justify-center p-12">
               {/* Animated Header */}
@@ -1980,10 +2809,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto custom-scrollbar">
-              <div className="max-w-3xl mx-auto py-12 px-8">
+              <div className="w-full flex flex-col h-full bg-slate-50/50 p-6">
                 <textarea
                   ref={titleRef}
-                  className="w-full text-4xl font-display font-bold mb-8 border-none focus:ring-0 placeholder-slate-300 text-slate-900 p-0 resize-none overflow-hidden bg-transparent"
+                  className="w-full text-4xl font-display font-bold mb-6 border-none focus:ring-0 placeholder-slate-300 text-slate-900 p-0 resize-none overflow-hidden bg-transparent"
                   value={content.title}
                   onChange={(e) => {
                     setContent({ ...content, title: e.target.value });
@@ -1999,7 +2828,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   placeholder="Untitled Document"
                 />
                 {content.body.includes('<!DOCTYPE html>') ? (
-                  <div className="w-full relative border border-slate-200 rounded-xl overflow-hidden shadow-sm mt-4 bg-white group" style={{ height: '800px' }}>
+                  <div className="w-full relative border border-slate-200 rounded-xl overflow-hidden shadow-sm mt-4 bg-white group flex-1 min-h-[800px]">
                     <button
                       onClick={() => setShowFullPreview(true)}
                       className="absolute top-4 right-4 z-10 bg-slate-900/80 hover:bg-slate-900 text-white p-2 rounded-lg shadow-md backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-2"
@@ -2472,32 +3301,47 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
             {/* Content */}
             <div className="p-4 max-h-[60vh] overflow-y-auto">
-              <div className="space-y-2">
-                {complianceTeam.map((member) => (
-                  <button
-                    key={member.id}
-                    onClick={() => setSelectedReviewer(member.id)}
-                    className={`w-full flex items-center gap-4 p-4 rounded-xl border transition-all ${selectedReviewer === member.id
-                        ? 'border-primary-500 bg-primary-50/50 ring-2 ring-primary-500/10'
-                        : 'border-slate-100 hover:border-slate-200 hover:bg-slate-50'
-                      }`}
-                  >
-                    <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white font-bold shadow-sm ${['bg-blue-500', 'bg-emerald-500', 'bg-violet-500', 'bg-amber-500'][parseInt(member.id) - 1]
-                      }`}>
-                      {member.avatar}
-                    </div>
-                    <div className="flex-1 text-left">
-                      <p className="font-semibold text-slate-800 leading-none mb-1">{member.name}</p>
-                      <p className="text-xs text-slate-500">{member.role}</p>
-                    </div>
-                    {selectedReviewer === member.id && (
-                      <div className="w-6 h-6 rounded-full bg-primary-500 flex items-center justify-center text-white">
-                        <Check size={14} strokeWidth={3} />
-                      </div>
-                    )}
-                  </button>
-                ))}
-              </div>
+              {complianceLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 size={28} className="animate-spin text-primary-600" />
+                </div>
+              ) : complianceTeam.length === 0 ? (
+                <div className="text-center py-12">
+                  <Users size={40} className="mx-auto text-slate-300 mb-3" />
+                  <p className="text-slate-600 font-medium">No compliance team members found</p>
+                  <p className="text-xs text-slate-400 mt-1">Sign up a user with the Compliance role to see them here.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {complianceTeam.map((member, idx) => {
+                    const initials = (member.name || member.email || '??').split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+                    const colors = ['bg-blue-500', 'bg-emerald-500', 'bg-violet-500', 'bg-amber-500', 'bg-pink-500', 'bg-teal-500'];
+                    return (
+                      <button
+                        key={member.id}
+                        onClick={() => setSelectedReviewer(member.id)}
+                        className={`w-full flex items-center gap-4 p-4 rounded-xl border transition-all ${selectedReviewer === member.id
+                          ? 'border-primary-500 bg-primary-50/50 ring-2 ring-primary-500/10'
+                          : 'border-slate-100 hover:border-slate-200 hover:bg-slate-50'
+                          }`}
+                      >
+                        <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white font-bold shadow-sm ${colors[idx % colors.length]}`}>
+                          {initials}
+                        </div>
+                        <div className="flex-1 text-left">
+                          <p className="font-semibold text-slate-800 leading-none mb-1">{member.name || 'Unnamed'}</p>
+                          <p className="text-xs text-slate-500">{member.email}</p>
+                        </div>
+                        {selectedReviewer === member.id && (
+                          <div className="w-6 h-6 rounded-full bg-primary-500 flex items-center justify-center text-white">
+                            <Check size={14} strokeWidth={3} />
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Footer */}

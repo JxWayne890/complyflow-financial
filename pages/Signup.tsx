@@ -15,6 +15,8 @@ const Signup: React.FC = () => {
         setLoading(true);
         setError(null);
 
+        const firstName = (e.target as any).firstName.value;
+        const lastName = (e.target as any).lastName.value;
         const email = (e.target as any).email.value;
         const password = (e.target as any).password.value;
         const confirmPassword = (e.target as any).confirmPassword.value;
@@ -31,6 +33,9 @@ const Signup: React.FC = () => {
                 password,
                 options: {
                     data: {
+                        full_name: `${firstName} ${lastName}`.trim(),
+                        first_name: firstName,
+                        last_name: lastName,
                         role: role
                     }
                 }
@@ -94,6 +99,28 @@ const Signup: React.FC = () => {
                 </div>
 
                 <form onSubmit={handleSignup} className="space-y-5">
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1.5">First Name</label>
+                            <input
+                                name="firstName"
+                                type="text"
+                                required
+                                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+                                placeholder="John"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1.5">Last Name</label>
+                            <input
+                                name="lastName"
+                                type="text"
+                                required
+                                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+                                placeholder="Doe"
+                            />
+                        </div>
+                    </div>
                     <div>
                         <label className="block text-sm font-medium text-slate-700 mb-1.5">Email Address</label>
                         <input

@@ -108,6 +108,21 @@ export interface ComplianceReview {
   created_at: string;
 }
 
+export interface ComplianceHighlight {
+  id: string;
+  org_id: string;
+  request_id: string;
+  version_id?: string | null;
+  highlight_id: string;
+  selected_text: string;
+  note: string;
+  status: 'open' | 'resolved';
+  created_by: string;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  created_at: string;
+}
+
 export interface SocialVariant {
   id: string;
   platform: string;

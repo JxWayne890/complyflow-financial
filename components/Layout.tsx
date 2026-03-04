@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -22,8 +22,17 @@ interface LayoutProps {
   profile: Profile | null;
 }
 
+const MIN_SIDEBAR_WIDTH = 200;
+const MAX_SIDEBAR_WIDTH = 400;
+const DEFAULT_SIDEBAR_WIDTH = 288; // Equivalent to Tailwind's w-72
+
 const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Resizable Sidebar State
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [isResizing, setIsResizing] = useState(false);
+
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -43,20 +52,58 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
 
   const filteredNav = navItems.filter(item => item.roles.includes(userRole));
 
+  const startResizing = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  }, []);
+
+  const stopResizing = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  const resize = useCallback((e: MouseEvent) => {
+    if (isResizing) {
+      const newWidth = e.clientX;
+      if (newWidth >= MIN_SIDEBAR_WIDTH && newWidth <= MAX_SIDEBAR_WIDTH) {
+        setSidebarWidth(newWidth);
+      }
+    }
+  }, [isResizing]);
+
+  useEffect(() => {
+    window.addEventListener('mousemove', resize);
+    window.addEventListener('mouseup', stopResizing);
+
+    return () => {
+      window.removeEventListener('mousemove', resize);
+      window.removeEventListener('mouseup', stopResizing);
+    };
+  }, [resize, stopResizing]);
+
+
   return (
     <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
       {/* Sidebar - Desktop */}
-      <aside className="hidden md:flex flex-col w-72 bg-white border-r border-slate-200 z-20">
+      <aside
+        className="hidden md:flex flex-col bg-white border-r border-slate-200 z-20 relative flex-shrink-0"
+        style={{ width: `${sidebarWidth}px` }}
+      >
+        {/* Drag Handle */}
+        <div
+          className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-primary-500/50 active:bg-primary-500 z-30 transition-colors"
+          onMouseDown={startResizing}
+        />
+
         <div className="p-6">
           <div className="flex items-center gap-2 mb-8">
-            <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center">
+            <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center flex-shrink-0">
               <ShieldCheck className="text-white" size={20} />
             </div>
-            <h1 className="text-xl font-display font-bold tracking-tight text-slate-900">ComplyFlow</h1>
+            {sidebarWidth > 220 && <h1 className="text-xl font-display font-bold tracking-tight text-slate-900 truncate">ComplyFlow</h1>}
           </div>
 
           <div className="px-3 py-2 bg-slate-50 rounded-xl mb-6 border border-slate-100">
-            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Organization</p>
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 truncate">Organization</p>
             <p className="text-sm font-medium text-slate-800 truncate">{profile?.org_id ? 'Your Organization' : 'No Org Connected'}</p>
           </div>
         </div>
@@ -74,7 +121,7 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
                   }`}
               >
                 <span className={isActive ? 'text-primary-600' : 'text-slate-400'}>{item.icon}</span>
-                {item.label}
+                <span className="truncate">{item.label}</span>
               </Link>
             );
           })}
@@ -85,8 +132,8 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
             onClick={handleSignOut}
             className="flex items-center gap-2 px-3 py-2 w-full text-left text-sm font-medium text-slate-500 hover:text-red-600 transition-colors rounded-lg hover:bg-red-50"
           >
-            <LogOut size={18} />
-            Sign out
+            <LogOut size={18} className="flex-shrink-0" />
+            <span className="truncate">Sign out</span>
           </button>
         </div>
       </aside>
