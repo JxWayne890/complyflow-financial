@@ -67,6 +67,8 @@ const EXTENSION_STEPS = [
 ];
 const NO_EM_DASH_INSTRUCTION =
   'Do not use em dashes (—), en dashes (–), or HTML dash entities (&mdash; or &ndash;). Use standard hyphen (-) or other punctuation instead.';
+const REWRITE_PLAIN_TEXT_INSTRUCTION =
+  'Return only the rewritten passage as plain text. Do not use Markdown syntax (such as #, *, **, _, `, lists), and do not wrap the answer in quotes or code fences.';
 
 interface ContentEditorProps {
   userRole: UserRole;
@@ -1093,6 +1095,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       if (requestUpdateError) throw requestUpdateError;
 
+      // Notify compliance team asynchronously
+      if (profile?.org_id) {
+        supabase.functions.invoke('notify-review', {
+          body: { request_id: currentRequestId, org_id: profile.org_id }
+        }).catch(err => console.error('Error notifying compliance:', err));
+      }
+
       setShowComplianceModal(false);
       setStatus(persistedStatus);
       navigate(`/content/${currentRequestId}`);
@@ -1365,6 +1374,26 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     return parsedText;
   }, []);
 
+  const stripMarkdownSyntax = useCallback((input: string): string => {
+    if (!input) return '';
+    return input
+      // Keep code content while removing code fence markers.
+      .replace(/```([\s\S]*?)```/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/^>\s?/gm, '')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/\*([^*\n]+)\*/g, '$1')
+      .replace(/_([^_\n]+)_/g, '$1')
+      .replace(/^\s*[-*+]\s+/gm, '')
+      .replace(/^\s*\d+\.\s+/gm, '')
+      .replace(/^\s*[-*+]\s+/g, '')
+      .replace(/^\s*\d+\.\s+/g, '');
+  }, []);
+
   const mainIframeRuntimeCleanupRef = useRef<(() => void) | null>(null);
   const fullscreenIframeRuntimeCleanupRef = useRef<(() => void) | null>(null);
   const mainBindRetryTimeoutsRef = useRef<number[]>([]);
@@ -1383,12 +1412,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     main: null,
     fullscreen: null,
   });
+  const mainContentEditableRuntimeRef = useRef<HTMLDivElement | null>(null);
 
   const bindIframeRuntime = useCallback((
     frameOrElement: HTMLIFrameElement | HTMLDivElement,
     cleanupRef: React.MutableRefObject<(() => void) | null>,
     runtimeKey: 'main' | 'fullscreen'
   ) => {
+    const editableRoot = frameOrElement instanceof HTMLDivElement ? frameOrElement : null;
+    const isContentEditableRuntime = Boolean(editableRoot);
     let frameWindow: Window;
     let frameDocument: Document;
 
@@ -1405,6 +1437,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       frameDocument = document;
     }
     if (!frameWindow || !frameDocument) return;
+
+    const contentRoot = editableRoot || frameDocument.body || frameDocument.documentElement;
+    if (!contentRoot) return;
 
     if (cleanupRef.current) {
       cleanupRef.current();
@@ -1658,6 +1693,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       }
     };
 
+    const normalizeNodeForContains = (node: Node | null) => (
+      node && node.nodeType === Node.TEXT_NODE ? node.parentNode : node
+    );
+
+    const isNodeInsideContentRoot = (node: Node | null) => {
+      if (!node) return false;
+      if (!isContentEditableRuntime || !editableRoot) return true;
+      const normalized = normalizeNodeForContains(node);
+      return !!normalized && editableRoot.contains(normalized);
+    };
+
+    const isRangeInsideContentRoot = (range: Range) => (
+      isNodeInsideContentRoot(range.startContainer) && isNodeInsideContentRoot(range.endContainer)
+    );
+
     const getRangeRect = (range: Range) => {
       const directRect = range.getBoundingClientRect();
       if (directRect.width > 0 || directRect.height > 0) {
@@ -1733,9 +1783,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const selection = frameWindow.getSelection();
       if (!selection) return;
 
-      const root = frameDocument.body || frameDocument.documentElement;
-      const startPos = resolveTextPosition(root, pendingSelection.start);
-      const endPos = resolveTextPosition(root, pendingSelection.end);
+      const startPos = resolveTextPosition(contentRoot, pendingSelection.start);
+      const endPos = resolveTextPosition(contentRoot, pendingSelection.end);
       if (!startPos || !endPos) return;
 
       const range = frameDocument.createRange();
@@ -1796,8 +1845,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     };
 
     const applyHighlightToRange = (range: Range, highlightId: string): boolean => {
-      const root = frameDocument.body || frameDocument.documentElement;
-      const walker = frameDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      const walker = frameDocument.createTreeWalker(contentRoot, NodeFilter.SHOW_TEXT, {
         acceptNode(node) {
           const textNode = node as Text;
           if (!(textNode.textContent || '').trim()) return NodeFilter.FILTER_REJECT;
@@ -1859,9 +1907,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const currentContent = latestContentRef.current;
       if (!currentRequestId || !currentContent) return null;
 
-      const updatedRawHtml = `<!DOCTYPE html>\n${frameDocument.documentElement.outerHTML}`;
-      const cleanedHtml = stripIframeEditorInjection(updatedRawHtml);
-      const currentBody = stripIframeEditorInjection(currentContent.body || '');
+      const cleanedHtml = isContentEditableRuntime
+        ? ((editableRoot?.innerHTML || '').trim())
+        : stripIframeEditorInjection(`<!DOCTYPE html>\n${frameDocument.documentElement.outerHTML}`);
+      const currentBody = isContentEditableRuntime
+        ? ((currentContent.body || '').trim())
+        : stripIframeEditorInjection(currentContent.body || '');
       if (!cleanedHtml || cleanedHtml === currentBody) return currentContent;
 
       const savedVersion = await createContentVersion(currentRequestId, {
@@ -1891,7 +1942,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       const rangeForNote = savedRange || noteDraftRange;
       const selectedTextForNote = (selectedText || noteDraftText || '').trim();
-      if (!rangeForNote || !selectedTextForNote) {
+      if (!rangeForNote || !selectedTextForNote || !isRangeInsideContentRoot(rangeForNote)) {
         setError('Highlight text first, then click Add Note and Save.');
         return;
       }
@@ -2000,6 +2051,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
     const runRewrite = async (mode: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance', complianceNote?: string) => {
       if (isBusy || !savedRange || !selectedText) return;
+      if (!isRangeInsideContentRoot(savedRange)) {
+        setError('Highlight text inside the editor, then try again.');
+        return;
+      }
 
       const fallbackText = selectedText;
       setBusyState(true);
@@ -2008,7 +2063,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         const response: any = await triggerContentGeneration({
           topic: rewriteContext.topic,
           contentType: rewriteContext.contentType,
-          instructions: `${rewriteContext.instructions || ''} ${NO_EM_DASH_INSTRUCTION}`.trim(),
+          instructions: `${rewriteContext.instructions || ''} ${NO_EM_DASH_INSTRUCTION} ${REWRITE_PLAIN_TEXT_INSTRUCTION}`.trim(),
           provider: rewriteContext.textProvider,
           action: 'rewrite',
           currentContent: fallbackText,
@@ -2017,14 +2072,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         });
 
         const rawRewrite = response?.data?.body || response?.data?.title || fallbackText;
-        const rewrittenText = normalizeRewriteText(rawRewrite) || fallbackText;
+        const rewrittenText = normalizeRewriteText(stripMarkdownSyntax(rawRewrite)) || fallbackText;
         const insertedTextNode = replaceSavedRange(rewrittenText);
         hidePill(true);
         if (!insertedTextNode) return;
 
-        const root = frameDocument.body || frameDocument.documentElement;
-        const start = getTextOffset(root, insertedTextNode, 0);
-        const end = getTextOffset(root, insertedTextNode, rewrittenText.length);
+        const start = getTextOffset(contentRoot, insertedTextNode, 0);
+        const end = getTextOffset(contentRoot, insertedTextNode, rewrittenText.length);
         if (start !== null && end !== null) {
           pendingSelectionRestoreRef.current[runtimeKey] = { start, end };
         }
@@ -2040,6 +2094,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
     const runPromptInstruction = async (promptInstruction: string) => {
       if (isBusy || !savedRange || !selectedText) return;
+      if (!isRangeInsideContentRoot(savedRange)) {
+        setError('Highlight text inside the editor, then try again.');
+        return;
+      }
       const instructionText = promptInstruction.trim();
       if (!instructionText) return;
 
@@ -2050,6 +2108,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         const promptScopedInstructions = [
           rewriteContext.instructions || '',
           NO_EM_DASH_INSTRUCTION,
+          REWRITE_PLAIN_TEXT_INSTRUCTION,
           'Apply ONLY the user instruction to the selected text. Keep all other wording unchanged.',
           'Do not add explanations, commentary, or extra content.',
           `User instruction: ${instructionText}`,
@@ -2066,14 +2125,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         });
 
         const rawRewrite = response?.data?.body || response?.data?.title || fallbackText;
-        const rewrittenText = normalizeRewriteText(rawRewrite) || fallbackText;
+        const rewrittenText = normalizeRewriteText(stripMarkdownSyntax(rawRewrite)) || fallbackText;
         const insertedTextNode = replaceSavedRange(rewrittenText);
         hidePill(true);
         if (!insertedTextNode) return;
 
-        const root = frameDocument.body || frameDocument.documentElement;
-        const start = getTextOffset(root, insertedTextNode, 0);
-        const end = getTextOffset(root, insertedTextNode, rewrittenText.length);
+        const start = getTextOffset(contentRoot, insertedTextNode, 0);
+        const end = getTextOffset(contentRoot, insertedTextNode, rewrittenText.length);
         if (start !== null && end !== null) {
           pendingSelectionRestoreRef.current[runtimeKey] = { start, end };
         }
@@ -2091,7 +2149,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       if (!manualEditTarget || isBusy) return;
       const activeTarget = manualEditTarget;
       manualEditTarget = null;
-      const root = frameDocument.body || frameDocument.documentElement;
       const normalizedText = normalizeRewriteText(activeTarget.textContent || manualOriginalText || '');
       const finalText = saveChanges ? (normalizedText || manualOriginalText || '') : (manualOriginalText || '');
       manualOriginalText = '';
@@ -2104,8 +2161,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       if (!saveChanges) return;
 
-      const start = getTextOffset(root, insertedTextNode, 0);
-      const end = getTextOffset(root, insertedTextNode, finalText.length);
+      const start = getTextOffset(contentRoot, insertedTextNode, 0);
+      const end = getTextOffset(contentRoot, insertedTextNode, finalText.length);
       if (start !== null && end !== null) {
         pendingSelectionRestoreRef.current[runtimeKey] = { start, end };
       }
@@ -2188,6 +2245,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       }
 
       const range = selection.getRangeAt(0);
+      if (!isRangeInsideContentRoot(range)) {
+        hidePill();
+        return;
+      }
       const ancestor = range.commonAncestorContainer;
       if (ancestor && pill.contains(ancestor.nodeType === Node.ELEMENT_NODE ? ancestor as Node : (ancestor.parentElement as Node))) {
         return;
@@ -2345,16 +2406,19 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       }
     }
 
-    addEvent(pill, 'mousedown', (event: Event) => {
+    const handlePillPointerDown = (event: Event) => {
       const target = event.target as HTMLElement | null;
       if (!target) return;
       // Keep mouse interactions inside the pill from triggering selection recapture/hide races.
       suppressCaptureFor(280);
-      // Allow controls to behave normally.
-      if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA' && target.tagName !== 'BUTTON') {
+      // In contentEditable mode, prevent focus from leaving the editor for button clicks.
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+      if (isContentEditableRuntime || target.tagName !== 'BUTTON') {
         event.preventDefault();
       }
-    });
+    };
+    addEvent(pill, 'pointerdown', handlePillPointerDown);
+    addEvent(pill, 'mousedown', handlePillPointerDown);
 
     // Click on a compliance highlight span → auto-select its text and show pill
     addEvent(frameDocument, 'click', (event: Event) => {
@@ -2473,7 +2537,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       unbindFns.forEach(unbind => unbind());
       hidePill(true);
     };
-  }, [canAddComplianceHighlights, createContentVersion, isComplianceNoteOnlyPill, normalizeRewriteText, profile?.id, profile?.org_id, stripIframeEditorInjection]);
+  }, [canAddComplianceHighlights, createContentVersion, isComplianceNoteOnlyPill, normalizeRewriteText, profile?.id, profile?.org_id, stripIframeEditorInjection, stripMarkdownSyntax]);
 
   const syncHighlightStatusInFrame = useCallback((doc: Document | null) => {
     if (!doc || complianceHighlights.length === 0) return;
@@ -2514,19 +2578,25 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   // Bind the editing pill to the plain-text contentEditable editor (when no iframe is used)
   useEffect(() => {
     const editor = editorRef.current;
-    if (!editor) return;
-    // Only bind if content is present and it's NOT rendered via iframe
-    if (!content?.body || content.body.includes('<!DOCTYPE html>')) return;
+    const shouldUseContentEditableRuntime = Boolean(
+      editor && content?.body && !content.body.includes('<!DOCTYPE html>')
+    );
 
-    // Small delay to ensure the DOM is ready
-    const timerId = window.setTimeout(() => {
-      if (!editorRef.current) return;
-      bindIframeRuntime(editorRef.current, mainIframeRuntimeCleanupRef, 'main');
-    }, 150);
+    if (!shouldUseContentEditableRuntime) {
+      if (mainContentEditableRuntimeRef.current && mainIframeRuntimeCleanupRef.current) {
+        mainIframeRuntimeCleanupRef.current();
+        mainIframeRuntimeCleanupRef.current = null;
+      }
+      mainContentEditableRuntimeRef.current = null;
+      return;
+    }
 
-    return () => {
-      window.clearTimeout(timerId);
-    };
+    if (mainContentEditableRuntimeRef.current === editor) {
+      return;
+    }
+
+    bindIframeRuntime(editor, mainIframeRuntimeCleanupRef, 'main');
+    mainContentEditableRuntimeRef.current = editor;
   }, [content?.body, bindIframeRuntime]);
 
   const handleFullscreenIframeLoad = useCallback(() => {
@@ -2557,6 +2627,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         mainIframeRuntimeCleanupRef.current();
         mainIframeRuntimeCleanupRef.current = null;
       }
+      mainContentEditableRuntimeRef.current = null;
     };
   }, []);
 
@@ -3506,7 +3577,17 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   contentEditable
                   suppressContentEditableWarning
                   dangerouslySetInnerHTML={{ __html: content.body }}
-                  onBlur={(e) => setContent({ ...content, body: e.currentTarget.innerHTML })}
+                  onBlur={(e) => {
+                    const nextFocused = e.relatedTarget as HTMLElement | null;
+                    if (nextFocused?.closest('#cfIframePill')) {
+                      return;
+                    }
+                    const nextBody = e.currentTarget.innerHTML;
+                    if (nextBody === content.body) {
+                      return;
+                    }
+                    setContent({ ...content, body: nextBody });
+                  }}
                 />
 
                 {/* Generate Image Button (Only if no image present or as an option) */}

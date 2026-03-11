@@ -9,6 +9,7 @@ import ContentEditor from './pages/ContentEditor';
 import ClientsList from './pages/ClientsList';
 import ClientDetail from './pages/ClientDetail';
 import MyLibrary from './pages/MyLibrary';
+import Settings from './pages/Settings';
 
 import { UserRole, Profile } from './types';
 import { supabase } from './services/supabaseClient';
@@ -132,7 +133,11 @@ const App: React.FC = () => {
           </Layout>
         } />
 
-
+        <Route path="/settings" element={
+          <Layout userRole={userRole} profile={effectiveProfile}>
+            <Settings profile={effectiveProfile} />
+          </Layout>
+        } />
 
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>

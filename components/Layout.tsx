@@ -47,7 +47,7 @@ const Layout: React.FC<LayoutProps> = ({ children, userRole, profile }) => {
     { label: 'My Library', path: '/library', icon: <LayoutDashboard size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
     { label: 'Clients', path: '/clients', icon: <Users size={18} />, roles: [UserRole.ADVISOR, UserRole.ADMIN] },
     { label: 'Review Queue', path: '/compliance', icon: <ShieldCheck size={18} />, roles: [UserRole.COMPLIANCE, UserRole.ADMIN] },
-
+    { label: 'Settings', path: '/settings', icon: <Settings size={18} />, roles: [UserRole.ADMIN, UserRole.COMPLIANCE] },
   ];
 
   const filteredNav = navItems.filter(item => item.roles.includes(userRole));
