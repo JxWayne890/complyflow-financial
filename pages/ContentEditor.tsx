@@ -1385,12 +1385,25 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   });
 
   const bindIframeRuntime = useCallback((
-    frame: HTMLIFrameElement,
+    frameOrElement: HTMLIFrameElement | HTMLDivElement,
     cleanupRef: React.MutableRefObject<(() => void) | null>,
     runtimeKey: 'main' | 'fullscreen'
   ) => {
-    const frameWindow = frame.contentWindow;
-    const frameDocument = frame.contentDocument;
+    let frameWindow: Window;
+    let frameDocument: Document;
+
+    if (frameOrElement instanceof HTMLIFrameElement) {
+      // iframe mode
+      const fw = frameOrElement.contentWindow;
+      const fd = frameOrElement.contentDocument;
+      if (!fw || !fd) return;
+      frameWindow = fw;
+      frameDocument = fd;
+    } else {
+      // contentEditable div mode — use main window/document
+      frameWindow = window;
+      frameDocument = document;
+    }
     if (!frameWindow || !frameDocument) return;
 
     if (cleanupRef.current) {
@@ -2497,6 +2510,24 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       mainBindRetryTimeoutsRef.current.push(timeoutId);
     });
   }, [bindIframeRuntime, syncHighlightStatusAcrossFrames]);
+
+  // Bind the editing pill to the plain-text contentEditable editor (when no iframe is used)
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    // Only bind if content is present and it's NOT rendered via iframe
+    if (!content.body || content.body.includes('<!DOCTYPE html>')) return;
+
+    // Small delay to ensure the DOM is ready
+    const timerId = window.setTimeout(() => {
+      if (!editorRef.current) return;
+      bindIframeRuntime(editorRef.current, mainIframeRuntimeCleanupRef, 'main');
+    }, 150);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [content.body, bindIframeRuntime]);
 
   const handleFullscreenIframeLoad = useCallback(() => {
     const frame = fullscreenIframeRef.current;
