@@ -2516,7 +2516,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     const editor = editorRef.current;
     if (!editor) return;
     // Only bind if content is present and it's NOT rendered via iframe
-    if (!content.body || content.body.includes('<!DOCTYPE html>')) return;
+    if (!content?.body || content.body.includes('<!DOCTYPE html>')) return;
 
     // Small delay to ensure the DOM is ready
     const timerId = window.setTimeout(() => {
@@ -2527,7 +2527,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     return () => {
       window.clearTimeout(timerId);
     };
-  }, [content.body, bindIframeRuntime]);
+  }, [content?.body, bindIframeRuntime]);
 
   const handleFullscreenIframeLoad = useCallback(() => {
     const frame = fullscreenIframeRef.current;
