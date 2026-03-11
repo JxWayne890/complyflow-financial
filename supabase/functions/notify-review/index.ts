@@ -98,7 +98,7 @@ serve(async (req) => {
         Authorization: `Bearer ${RESEND_API_KEY}`,
       },
       body: JSON.stringify({
-        from: 'ComplyFlow Notifications <notifications@complyflow.com>',
+        from: 'Comply Flow <onboarding@resend.dev>',
         to: recipientEmails, // Array of emails
         subject: `Review Required: New Content from ${advisorName}`,
         html: `
