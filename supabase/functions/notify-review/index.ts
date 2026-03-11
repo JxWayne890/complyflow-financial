@@ -25,8 +25,8 @@ serve(async (req) => {
     }
 
     // Initialize Supabase client
-    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    const supabaseUrl = Deno.env.get('MY_SUPABASE_URL') ?? '';
+    const supabaseServiceKey = Deno.env.get('MY_SUPABASE_SERVICE_ROLE_KEY') ?? '';
     
     // We need service role to query profiles (other users)
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
