@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { supabase } from '../services/supabaseClient';
 import { UserRole, ContentStatus, Profile } from '../types';
 import StatusBadge from '../components/StatusBadge';
-import { Plus, ArrowRight, Activity, Clock, ShieldCheck, FileText, BarChart3, Loader2 } from 'lucide-react';
+import { Plus, ArrowRight, Activity, Clock, ShieldCheck, FileText, BarChart3, Loader2, Check } from 'lucide-react';
 
 interface DashboardProps {
   userRole: UserRole;
@@ -25,6 +25,7 @@ interface ComplianceItem {
   advisor: string;
   type: string;
   submitted: string;
+  isResubmitted?: boolean;
 }
 
 const formatRelativeTime = (dateString: string) => {
@@ -82,14 +83,20 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
 
       // 1. Fetch content_requests for metrics
       // Compliance users only see submitted/in_review items
-      let query = supabase
-        .from('content_requests')
-        .select('id, status, updated_at, topic_text, content_type, advisor_id')
-        .eq('org_id', profile!.org_id)
-        .order('updated_at', { ascending: false });
-
+      let query;
       if (isCompliance) {
-        query = query.in('status', ['submitted', 'in_review']);
+        query = supabase
+          .from('content_requests')
+          .select('id, status, updated_at, topic_text, content_type, advisor_id')
+          .eq('org_id', profile!.org_id)
+          .in('status', ['submitted', 'in_review'])
+          .order('updated_at', { ascending: false });
+      } else {
+        query = supabase
+          .from('content_requests')
+          .select('*, topics!inner(category, theme), content_versions(title, body)')
+          .eq('org_id', profile!.org_id)
+          .order('updated_at', { ascending: false });
       }
 
       const { data: allRequests, error: reqError } = await query;
@@ -171,6 +178,7 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
       // 3. Compliance Queue (submitted / in_review items with advisor names)
       const pendingReqs = requests.filter(r => r.status === 'submitted' || r.status === 'in_review');
       if (pendingReqs.length > 0) {
+        const pendingReqIds = pendingReqs.map(r => r.id);
         const advisorIds = [...new Set(pendingReqs.map(r => r.advisor_id).filter(Boolean))];
         let advisorMap: Record<string, string> = {};
         if (advisorIds.length > 0) {
@@ -181,13 +189,30 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
           (advisors || []).forEach((a: any) => { advisorMap[a.id] = a.name; });
         }
 
-        const queueItems: ComplianceItem[] = pendingReqs.slice(0, 10).map(r => ({
-          id: r.id,
-          title: r.topic_text || 'Untitled',
-          advisor: advisorMap[r.advisor_id] || 'Unknown',
-          type: getContentTypeLabel(r.content_type),
-          submitted: formatRelativeTime(r.updated_at),
-        }));
+        // Fetch compliance reviews separately to see if they've been queried/returned before
+        let reviewMap: Record<string, string[]> = {};
+        const { data: recentReviews } = await supabase
+          .from('compliance_reviews')
+          .select('request_id, decision')
+          .in('request_id', pendingReqIds);
+
+        (recentReviews || []).forEach((rev: any) => {
+          if (!reviewMap[rev.request_id]) reviewMap[rev.request_id] = [];
+          reviewMap[rev.request_id].push(rev.decision);
+        });
+
+        const queueItems: ComplianceItem[] = pendingReqs.slice(0, 10).map(r => {
+          const decisions = reviewMap[r.id] || [];
+          const hasBeenRequested = decisions.includes('changes_requested') || decisions.includes('resubmitted');
+          return {
+            id: r.id,
+            title: r.topic_text || 'Untitled',
+            advisor: advisorMap[r.advisor_id] || 'Unknown',
+            type: getContentTypeLabel(r.content_type),
+            submitted: formatRelativeTime(r.updated_at),
+            isResubmitted: hasBeenRequested,
+          };
+        });
         setComplianceQueue(queueItems);
       }
     } catch (error) {
@@ -351,6 +376,11 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
                         <span className="text-xs font-medium text-slate-700">{item.advisor}</span>
                         <span className="text-xs text-slate-300">•</span>
                         <span className="text-xs text-slate-400">{item.submitted}</span>
+                        {item.isResubmitted && (
+                          <span className="text-[9px] font-bold text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-sm uppercase tracking-wider ml-1">
+                            Resubmitted
+                          </span>
+                        )}
                       </div>
                       <h4 className="text-base font-semibold text-slate-900 group-hover:text-primary-600 transition-colors truncate">{item.title}</h4>
                     </div>
@@ -364,6 +394,47 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, profile }) => {
           </div>
         )}
       </div>
+
+      {/* Recently Approved — Advisor/Admin only */}
+      {userRole !== UserRole.COMPLIANCE && allDrafts.filter(d => d.status === ContentStatus.APPROVED).length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-emerald-200 overflow-hidden">
+          <div className="p-6 border-b border-emerald-100 flex justify-between items-center bg-gradient-to-r from-emerald-50/50 to-teal-50/50">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-emerald-100 rounded-lg">
+                <ShieldCheck size={18} className="text-emerald-600" />
+              </div>
+              <h3 className="font-semibold text-slate-900">Recently Approved</h3>
+            </div>
+            <span className="text-xs font-medium text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200">
+              {allDrafts.filter(d => d.status === ContentStatus.APPROVED).length} ready to publish
+            </span>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {allDrafts.filter(d => d.status === ContentStatus.APPROVED).map(item => (
+              <Link key={item.id} to={`/content/${item.id}`} className="block p-4 hover:bg-emerald-50/30 transition-colors group">
+                <div className="flex items-center justify-between">
+                  <div className="flex-1 min-w-0 pr-4">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs font-medium text-slate-500">{item.type}</span>
+                      <span className="text-xs text-slate-300">•</span>
+                      <span className="text-xs text-slate-400">{item.date}</span>
+                    </div>
+                    <h4 className="text-base font-semibold text-slate-900 group-hover:text-emerald-700 transition-colors truncate">
+                      {item.title}
+                    </h4>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                      <Check size={9} strokeWidth={3} /> Approved
+                    </span>
+                    <ArrowRight size={18} className="text-slate-300 group-hover:text-emerald-600 transition-colors" />
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* All My Drafts — Full Width (hidden for Compliance) */}
       {userRole !== UserRole.COMPLIANCE && (

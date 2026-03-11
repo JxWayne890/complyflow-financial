@@ -102,7 +102,7 @@ export interface ContentVersion {
 
 export interface ComplianceReview {
   id: string;
-  decision: 'approved' | 'changes_requested' | 'rejected';
+  decision: 'approved' | 'changes_requested' | 'rejected' | 'resubmitted';
   notes: string;
   reviewer_id: string;
   created_at: string;
@@ -119,6 +119,7 @@ export interface ComplianceHighlight {
   status: 'open' | 'resolved';
   created_by: string;
   resolved_by?: string | null;
+  resolution_note?: string | null;
   resolved_at?: string | null;
   created_at: string;
 }

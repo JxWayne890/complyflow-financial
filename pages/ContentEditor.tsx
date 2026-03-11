@@ -29,13 +29,18 @@ import {
   Search,
   UserPlus,
   Building2,
-  BarChart3
+  BarChart3,
+  ShieldCheck,
+  Lock,
+  Unlock
 } from 'lucide-react';
 import {
   BarChart,
   Bar,
   LineChart,
   Line,
+  AreaChart,
+  Area,
   PieChart,
   Pie,
   Cell,
@@ -70,6 +75,10 @@ interface ContentEditorProps {
 
 type TextProvider = 'claude' | 'kimi';
 type ImageProvider = 'gemini' | 'chatgpt';
+type InlineHighlight = ComplianceHighlight & {
+  local_state?: 'saving' | 'error';
+  local_error?: string | null;
+};
 
 const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [searchParams] = useSearchParams();
@@ -101,6 +110,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [clientSearch, setClientSearch] = useState('');
   const [isSavingToClient, setIsSavingToClient] = useState(false);
   const [savedClientName, setSavedClientName] = useState<string | null>(null);
+  const [savedClientId, setSavedClientId] = useState<string | null>(null);
 
   // Iframe Select & Fix State
   const [stableIframeSrcDoc, setStableIframeSrcDoc] = useState('');
@@ -114,15 +124,29 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [content, setContent] = useState<ContentVersion | null>(null);
   const [status, setStatus] = useState<ContentStatus>(ContentStatus.DRAFT);
   const [reviews, setReviews] = useState<ComplianceReview[]>([]);
-  const [complianceHighlights, setComplianceHighlights] = useState<ComplianceHighlight[]>([]);
+  const [complianceHighlights, setComplianceHighlights] = useState<InlineHighlight[]>([]);
+  const complianceHighlightsRef = useRef<InlineHighlight[]>([]);
+  useEffect(() => { complianceHighlightsRef.current = complianceHighlights; }, [complianceHighlights]);
   const [updatingHighlightId, setUpdatingHighlightId] = useState<string | null>(null);
+  const [expandedNoteIds, setExpandedNoteIds] = useState<Set<string>>(new Set());
+  const [isGeneratorExpanded, setIsGeneratorExpanded] = useState(true);
+  const [isNotesListExpanded, setIsNotesListExpanded] = useState(true);
   const [isLoadingRequest, setIsLoadingRequest] = useState(false);
   const [showComplianceModal, setShowComplianceModal] = useState(false);
   const [selectedReviewer, setSelectedReviewer] = useState<string | null>(null);
+  const [lastReviewerName, setLastReviewerName] = useState<string | null>(null);
 
   const [complianceTeam, setComplianceTeam] = useState<{ id: string; name: string; email: string }[]>([]);
   const [complianceLoading, setComplianceLoading] = useState(false);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [isApprovedLocked, setIsApprovedLocked] = useState(false);
+
+  // Auto-lock content when status becomes APPROVED
+  useEffect(() => {
+    if (status === ContentStatus.APPROVED) {
+      setIsApprovedLocked(true);
+    }
+  }, [status]);
 
   // Resizable Notes Panel State
   const MIN_NOTES_WIDTH = 250;
@@ -223,6 +247,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       setInstructions(requestData.instructions || '');
       setStatus((requestData.status as ContentStatus) || ContentStatus.DRAFT);
       setRequestId(requestData.id);
+      setSavedClientName(null);
+      setSavedClientId(requestData.client_id || null);
+
+      // If a client was already assigned, load their name
+      if (requestData.client_id) {
+        setSavedClientName('Assigned Client');
+        const { data: clientData, error: clientError } = await supabase
+          .from('clients')
+          .select('name')
+          .eq('id', requestData.client_id)
+          .maybeSingle();
+        if (!clientError && clientData?.name) {
+          setSavedClientName(clientData.name);
+        }
+      }
 
       const { data: latestVersionData, error: latestVersionError } = await supabase
         .from('content_versions')
@@ -235,6 +274,23 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       if (latestVersionError) throw latestVersionError;
       setContent(latestVersionData || null);
 
+      // Fallback: if request.client_id is missing but this version was shared, derive client from share record.
+      if (!requestData.client_id && latestVersionData?.id) {
+        const { data: latestShare, error: shareError } = await supabase
+          .from('client_content_shares')
+          .select('client_id, shared_at, clients:client_id(name)')
+          .eq('content_version_id', latestVersionData.id)
+          .order('shared_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!shareError && latestShare?.client_id) {
+          const fallbackName = (latestShare as any)?.clients?.name || null;
+          setSavedClientId(latestShare.client_id);
+          setSavedClientName(fallbackName || 'Assigned Client');
+        }
+      }
+
       const { data: reviewData, error: reviewError } = await supabase
         .from('compliance_reviews')
         .select('id, decision, notes, reviewer_id, created_at')
@@ -244,14 +300,25 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       if (reviewError) throw reviewError;
       setReviews((reviewData || []) as ComplianceReview[]);
 
+      // Look up the last reviewer's name for the "Resubmit to [Name]" button
+      const lastReviewerId = (reviewData || []).find((r: any) => r.reviewer_id)?.reviewer_id;
+      if (lastReviewerId) {
+        const { data: reviewerProfile } = await supabase
+          .from('profiles')
+          .select('name')
+          .eq('id', lastReviewerId)
+          .single();
+        setLastReviewerName(reviewerProfile?.name || null);
+      }
+
       const { data: highlightData, error: highlightError } = await supabase
         .from('compliance_highlights')
-        .select('id, org_id, request_id, version_id, highlight_id, selected_text, note, status, created_by, resolved_by, resolved_at, created_at')
+        .select('id, org_id, request_id, version_id, highlight_id, selected_text, note, status, created_by, resolved_by, resolution_note, resolved_at, created_at')
         .eq('request_id', requestIdToLoad)
         .order('created_at', { ascending: false });
 
       if (highlightError) throw highlightError;
-      setComplianceHighlights((highlightData || []) as ComplianceHighlight[]);
+      setComplianceHighlights((highlightData || []) as InlineHighlight[]);
     } catch (e: any) {
       console.error("Failed to load content request:", e);
       if (e?.code === '42P01') {
@@ -331,10 +398,19 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
   const canAddComplianceHighlights =
     (userRole === UserRole.COMPLIANCE || userRole === UserRole.ADMIN)
-    && [ContentStatus.SUBMITTED, ContentStatus.IN_REVIEW, ContentStatus.CHANGES_REQUESTED].includes(status);
+    && [ContentStatus.SUBMITTED, ContentStatus.IN_REVIEW, ContentStatus.CHANGES_REQUESTED, ContentStatus.APPROVED].includes(status);
+
+  const isComplianceNoteOnlyPill = userRole === UserRole.COMPLIANCE;
 
   const canResolveComplianceHighlights =
     (userRole === UserRole.ADVISOR || userRole === UserRole.COMPLIANCE || userRole === UserRole.ADMIN);
+
+  useEffect(() => {
+    if (complianceHighlights.length === 0) {
+      setExpandedNoteIds(new Set());
+      return;
+    }
+  }, [complianceHighlights]);
 
   const ensureRequestId = async (): Promise<string> => {
     if (!profile?.id || !profile?.org_id) {
@@ -348,9 +424,16 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         topic_text: topic,
         content_type: contentType,
         instructions,
-        client_id: parsedClientId,
         updated_at: new Date().toISOString(),
       };
+
+      // Do not clear an existing client assignment when URL has no clientId param.
+      // Keep the currently assigned client for this request unless a new one is explicitly provided.
+      if (parsedClientId) {
+        updates.client_id = parsedClientId;
+      } else if (savedClientId) {
+        updates.client_id = savedClientId;
+      }
 
       if (status === ContentStatus.CHANGES_REQUESTED) {
         updates.status = ContentStatus.DRAFT;
@@ -363,6 +446,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       if (requestUpdateError) throw requestUpdateError;
       if (updates.status) setStatus(updates.status);
+      if (updates.client_id) setSavedClientId(updates.client_id);
       return requestId;
     }
 
@@ -395,6 +479,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       throw requestError;
     }
     setRequestId(requestData.id);
+    if (parsedClientId) setSavedClientId(parsedClientId);
     return requestData.id;
   };
 
@@ -483,8 +568,18 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         ? 'Enter requested changes for the advisor:'
         : 'Enter rejection reason:';
 
-    const noteValue = window.prompt(notePrompt) ?? '';
-    if (decision !== 'approved' && !noteValue.trim()) {
+    // If inline highlights exist for changes_requested, auto-populate the note
+    const openHighlightCount = complianceHighlights.filter(h => h.status === 'open').length;
+    let noteValue: string;
+    if (decision === 'changes_requested' && openHighlightCount > 0) {
+      noteValue = window.prompt(
+        notePrompt + `\n\n(${openHighlightCount} inline note(s) are already attached to this blog.)`,
+        `See ${openHighlightCount} inline highlight note(s) for specific changes.`
+      ) ?? '';
+    } else {
+      noteValue = window.prompt(notePrompt) ?? '';
+    }
+    if (decision !== 'approved' && !noteValue.trim() && openHighlightCount === 0) {
       return;
     }
 
@@ -923,6 +1018,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const currentRequestId = await ensureRequestId();
 
       if (newStatus === ContentStatus.SUBMITTED) {
+        // If this is a resubmission (status is CHANGES_REQUESTED) and we have a previous reviewer,
+        // skip the modal and auto-submit to the same reviewer
+        if (status === ContentStatus.CHANGES_REQUESTED && reviews.length > 0) {
+          const lastReviewer = reviews.find(r => r.reviewer_id)?.reviewer_id;
+          if (lastReviewer) {
+            await handleConfirmReviewSubmit(lastReviewer);
+            return;
+          }
+        }
         setShowComplianceModal(true);
         return;
       }
@@ -947,8 +1051,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   };
 
-  const handleConfirmReviewSubmit = async () => {
-    if (!selectedReviewer) return;
+  const handleConfirmReviewSubmit = async (overrideReviewerId?: string) => {
+    const reviewerId = overrideReviewerId || selectedReviewer;
+    if (!reviewerId) return;
 
     try {
       setError(null);
@@ -960,6 +1065,23 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       await saveCurrentEditorVersion(currentRequestId);
 
       const persistedStatus = ContentStatus.IN_REVIEW;
+
+      // Automatically log a review entry if this is a resubmission
+      if (status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED) {
+        const { data: reviewData, error: reviewError } = await supabase
+          .from('compliance_reviews')
+          .insert({
+            request_id: currentRequestId,
+            reviewer_id: profile?.id,
+            decision: 'resubmitted',
+            notes: 'Changes made by advisor to address compliance notes.',
+          })
+          .select('id, decision, notes, reviewer_id, created_at')
+          .single();
+
+        if (reviewError) throw reviewError;
+        setReviews(prev => [reviewData as unknown as ComplianceReview, ...prev]);
+      }
 
       const { error: requestUpdateError } = await supabase
         .from('content_requests')
@@ -1135,8 +1257,30 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.45);
     transition: box-shadow 200ms ease;
   }
+  .cf-compliance-highlight.cf-pulse {
+    animation: cfHighlightPulse 1.6s ease-out 1;
+  }
+  @keyframes cfHighlightPulse {
+    0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.85); }
+    60% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0.0); }
+    100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.0); }
+  }
+  .cf-pill .cf-note-disabled {
+    color: #cbd5e1;
+    font-size: 12px;
+    padding: 2px 4px;
+  }
 </style>
 <div id="cfIframePill" class="cf-pill" role="toolbar" aria-label="Select and fix toolbar">
+  ${isComplianceNoteOnlyPill ? `
+  ${canAddComplianceHighlights ? `
+  <button type="button" id="cfHighlightToggle">Add Note</button>
+  <form class="cf-highlight-note" id="cfHighlightForm">
+    <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
+    <button type="submit" id="cfHighlightSave">Save</button>
+  </form>
+  ` : '<span class="cf-note-disabled">Highlights are unavailable for this status.</span>'}
+  ` : `
   <button type="button" data-mode="rewrite">Rewrite</button>
   <button type="button" data-mode="shorten">Shorten</button>
   <button type="button" data-mode="expand">Expand</button>
@@ -1152,13 +1296,14 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   <button type="button" id="cfHighlightToggle">Add Note</button>
   <form class="cf-highlight-note" id="cfHighlightForm">
     <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
-    <button type="submit">Save</button>
+    <button type="submit" id="cfHighlightSave">Save</button>
   </form>
   ` : ''}
   <form class="cf-prompt" id="cfPromptForm">
     <textarea id="cfPromptInput" placeholder="Tell AI exactly what to change in this selected text only..."></textarea>
     <button type="submit">Run</button>
   </form>
+  `}
 </div>
 <!-- CF_IFRAME_EDIT_BRIDGE_END -->
 `.trim();
@@ -1168,7 +1313,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
 
     return `${cleanedHtml}${bridgeBlock}`;
-  }, [canAddComplianceHighlights, stripIframeEditorInjection]);
+  }, [canAddComplianceHighlights, isComplianceNoteOnlyPill, stripIframeEditorInjection]);
 
   useEffect(() => {
     if (!content?.body || !content.body.includes('<!DOCTYPE html>')) {
@@ -1354,8 +1499,30 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.45);
             transition: box-shadow 200ms ease;
           }
+          .cf-compliance-highlight.cf-pulse {
+            animation: cfHighlightPulse 1.6s ease-out 1;
+          }
+          @keyframes cfHighlightPulse {
+            0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.85); }
+            60% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0.0); }
+            100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.0); }
+          }
+          .cf-pill .cf-note-disabled {
+            color: #cbd5e1;
+            font-size: 12px;
+            padding: 2px 4px;
+          }
       `;
       const pillMarkup = `
+          ${isComplianceNoteOnlyPill ? `
+          ${canAddComplianceHighlights ? `
+          <button type="button" id="cfHighlightToggle">Add Note</button>
+          <form class="cf-highlight-note" id="cfHighlightForm">
+            <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
+            <button type="submit" id="cfHighlightSave">Save</button>
+          </form>
+          ` : '<span class="cf-note-disabled">Highlights are unavailable for this status.</span>'}
+          ` : `
           <button type="button" data-mode="rewrite">Rewrite</button>
           <button type="button" data-mode="shorten">Shorten</button>
           <button type="button" data-mode="expand">Expand</button>
@@ -1371,13 +1538,14 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           <button type="button" id="cfHighlightToggle">Add Note</button>
           <form class="cf-highlight-note" id="cfHighlightForm">
             <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
-            <button type="submit">Save</button>
+            <button type="submit" id="cfHighlightSave">Save</button>
           </form>
           ` : ''}
           <form class="cf-prompt" id="cfPromptForm">
             <textarea id="cfPromptInput" placeholder="Tell AI exactly what to change in this selected text only..."></textarea>
             <button type="submit">Run</button>
           </form>
+          `}
       `.trim();
 
       let styleElement = frameDocument.getElementById('cf-iframe-edit-style') as HTMLStyleElement | null;
@@ -1411,6 +1579,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     const highlightToggle = frameDocument.getElementById('cfHighlightToggle') as HTMLButtonElement | null;
     const highlightForm = frameDocument.getElementById('cfHighlightForm') as HTMLFormElement | null;
     const highlightInput = frameDocument.getElementById('cfHighlightInput') as HTMLInputElement | null;
+    const highlightSaveButton = frameDocument.getElementById('cfHighlightSave') as HTMLButtonElement | null;
     const manualToggle = frameDocument.getElementById('cfManualToggle') as HTMLButtonElement | null;
     const promptToggle = frameDocument.getElementById('cfPromptToggle') as HTMLButtonElement | null;
     const promptForm = frameDocument.getElementById('cfPromptForm') as HTMLFormElement | null;
@@ -1419,6 +1588,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
     let savedRange: Range | null = null;
     let selectedText = '';
+    let noteDraftRange: Range | null = null;
+    let noteDraftText = '';
+    let suppressCaptureUntil = 0;
     let isBusy = false;
     let manualEditTarget: HTMLSpanElement | null = null;
     let manualOriginalText = '';
@@ -1434,6 +1606,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     ) => {
       target.addEventListener(event, handler, options);
       unbindFns.push(() => target.removeEventListener(event, handler, options));
+    };
+
+    const suppressCaptureFor = (ms = 260) => {
+      suppressCaptureUntil = Date.now() + ms;
     };
 
     const hidePill = (force = false) => {
@@ -1581,6 +1757,90 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       return insertedTextNode;
     };
 
+    const pulseHighlightNodes = (highlightId: string) => {
+      const nodes = frameDocument.querySelectorAll<HTMLElement>(`[data-cf-highlight-id="${highlightId}"]`);
+      nodes.forEach((node) => {
+        node.classList.remove('cf-pulse');
+        void node.offsetWidth;
+        node.classList.add('cf-pulse');
+        frameWindow.setTimeout(() => node.classList.remove('cf-pulse'), 1800);
+      });
+    };
+
+    const unwrapHighlightNodes = (highlightId: string) => {
+      const nodes = Array.from(
+        frameDocument.querySelectorAll<HTMLElement>(`[data-cf-highlight-id="${highlightId}"]`)
+      );
+      nodes.forEach((node) => {
+        const parent = node.parentNode;
+        if (!parent) return;
+        while (node.firstChild) {
+          parent.insertBefore(node.firstChild, node);
+        }
+        parent.removeChild(node);
+        (parent as HTMLElement).normalize();
+      });
+    };
+
+    const applyHighlightToRange = (range: Range, highlightId: string): boolean => {
+      const root = frameDocument.body || frameDocument.documentElement;
+      const walker = frameDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          const textNode = node as Text;
+          if (!(textNode.textContent || '').trim()) return NodeFilter.FILTER_REJECT;
+          const parent = textNode.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          if (parent.closest('#cfIframePill')) return NodeFilter.FILTER_REJECT;
+          if (parent.closest('[data-cf-highlight-id]')) return NodeFilter.FILTER_REJECT;
+          try {
+            return range.intersectsNode(textNode) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          } catch {
+            return NodeFilter.FILTER_REJECT;
+          }
+        },
+      });
+
+      const textNodes: Text[] = [];
+      let current = walker.nextNode();
+      while (current) {
+        textNodes.push(current as Text);
+        current = walker.nextNode();
+      }
+      if (textNodes.length === 0) return false;
+
+      let wrappedCount = 0;
+      textNodes.forEach((textNode) => {
+        const fullLength = textNode.textContent?.length || 0;
+        const startOffset = textNode === range.startContainer ? range.startOffset : 0;
+        const endOffset = textNode === range.endContainer ? range.endOffset : fullLength;
+        if (endOffset <= startOffset) return;
+
+        let targetNode = textNode;
+        if (startOffset > 0) {
+          targetNode = targetNode.splitText(startOffset);
+        }
+
+        const targetLength = targetNode.textContent?.length || 0;
+        const highlightLength = Math.min(Math.max(endOffset - startOffset, 0), targetLength);
+        if (highlightLength <= 0) return;
+        if (highlightLength < targetLength) {
+          targetNode.splitText(highlightLength);
+        }
+
+        const wrapper = frameDocument.createElement('span');
+        wrapper.className = 'cf-compliance-highlight';
+        wrapper.setAttribute('data-cf-highlight-id', highlightId);
+        wrapper.setAttribute('data-cf-highlight-status', 'open');
+        const parent = targetNode.parentNode;
+        if (!parent) return;
+        parent.replaceChild(wrapper, targetNode);
+        wrapper.appendChild(targetNode);
+        wrappedCount += 1;
+      });
+
+      return wrappedCount > 0;
+    };
+
     const saveIframeHtml = async (): Promise<ContentVersion | null> => {
       const currentRequestId = latestRequestIdRef.current;
       const currentContent = latestContentRef.current;
@@ -1608,44 +1868,57 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     };
 
     const createComplianceHighlight = async (noteText: string) => {
-      if (isBusy || !savedRange || !selectedText || !profile?.id || !profile?.org_id) return;
+      if (isBusy || !profile?.id || !profile?.org_id) return;
       const currentRequestId = latestRequestIdRef.current;
       const currentContent = latestContentRef.current;
-      if (!currentRequestId || !currentContent) return;
+      if (!currentRequestId || !currentContent) {
+        setError('Missing request/content context. Reload this draft and try again.');
+        return;
+      }
+
+      const rangeForNote = savedRange || noteDraftRange;
+      const selectedTextForNote = (selectedText || noteDraftText || '').trim();
+      if (!rangeForNote || !selectedTextForNote) {
+        setError('Highlight text first, then click Add Note and Save.');
+        return;
+      }
 
       const note = noteText.trim();
       if (!note) return;
+      const extractedText = selectedTextForNote.replace(/\s+/g, ' ').trim();
+      if (!extractedText) return;
+
+      const highlightId = (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      const optimisticId = `pending-${highlightId}`;
+      const optimisticHighlight: InlineHighlight = {
+        id: optimisticId,
+        org_id: profile.org_id,
+        request_id: currentRequestId,
+        version_id: currentContent.id || null,
+        highlight_id: highlightId,
+        selected_text: extractedText,
+        note,
+        status: 'open',
+        created_by: profile.id,
+        resolved_by: null,
+        resolved_at: null,
+        created_at: new Date().toISOString(),
+        local_state: 'saving',
+        local_error: null,
+      };
 
       setBusyState(true);
       try {
-        const selection = frameWindow.getSelection();
-        if (!selection) return;
-
-        selection.removeAllRanges();
-        selection.addRange(savedRange);
-        const activeRange = selection.getRangeAt(0);
-        const fragment = activeRange.extractContents();
-        const extractedText = fragment.textContent?.replace(/\s+/g, ' ').trim() || selectedText;
-        if (!extractedText) {
-          hidePill(true);
-          return;
+        const applied = applyHighlightToRange(rangeForNote, highlightId);
+        if (!applied) {
+          throw new Error('Could not apply highlight for this selection. Try selecting text inside one paragraph and save again.');
         }
 
-        const highlightId = (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-        const highlightNode = frameDocument.createElement('span');
-        highlightNode.className = 'cf-compliance-highlight';
-        highlightNode.setAttribute('data-cf-highlight-id', highlightId);
-        highlightNode.setAttribute('data-cf-highlight-status', 'open');
-        highlightNode.appendChild(fragment);
-        activeRange.insertNode(highlightNode);
-        highlightNode.parentElement?.normalize();
-
-        const focusRange = frameDocument.createRange();
-        focusRange.selectNodeContents(highlightNode);
-        selection.removeAllRanges();
-        selection.addRange(focusRange);
-
+        pulseHighlightNodes(highlightId);
+        setComplianceHighlights(prev => [optimisticHighlight, ...prev]);
+        setExpandedNoteIds(prev => new Set(prev).add(optimisticId));
         hidePill(true);
+
         const savedVersion = await saveIframeHtml();
         const targetVersionId = savedVersion?.id || currentContent.id;
 
@@ -1661,15 +1934,53 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             status: 'open',
             created_by: profile.id,
           })
-          .select('id, org_id, request_id, version_id, highlight_id, selected_text, note, status, created_by, resolved_by, resolved_at, created_at')
+          .select('id, org_id, request_id, version_id, highlight_id, selected_text, note, status, created_by, resolved_by, resolution_note, resolved_at, created_at')
           .single();
 
-        if (insertHighlightError) throw insertHighlightError;
-        setComplianceHighlights(prev => [insertedHighlight as ComplianceHighlight, ...prev]);
+        if (insertHighlightError) {
+          unwrapHighlightNodes(highlightId);
+          await saveIframeHtml().catch(() => undefined);
+          throw insertHighlightError;
+        }
+
+        const finalHighlight = insertedHighlight as InlineHighlight;
+        setComplianceHighlights(prev => prev.map(item => (
+          item.id === optimisticId ? finalHighlight : item
+        )));
+        setExpandedNoteIds(prev => {
+          const next = new Set(prev);
+          next.delete(optimisticId);
+          next.add(finalHighlight.id);
+          return next;
+        });
+        frameWindow.setTimeout(() => {
+          scrollToHighlight(finalHighlight.highlight_id, { pulse: true });
+        }, 180);
+        noteDraftRange = null;
+        noteDraftText = '';
       } catch (e: any) {
         console.error(e);
+        unwrapHighlightNodes(highlightId);
+        setComplianceHighlights(prev => {
+          const hasOptimistic = prev.some(item => item.id === optimisticId);
+          if (!hasOptimistic) {
+            return [{
+              ...optimisticHighlight,
+              local_state: 'error',
+              local_error: e.message || 'Failed to save inline note.',
+            }, ...prev];
+          }
+          return prev.map(item => (
+            item.id === optimisticId
+              ? { ...item, local_state: 'error', local_error: e.message || 'Failed to save inline note.' }
+              : item
+          ));
+        });
+        setExpandedNoteIds(prev => new Set(prev).add(optimisticId));
         setError(e.message || 'Failed to save compliance highlight.');
       } finally {
+        noteDraftRange = null;
+        noteDraftText = '';
         setBusyState(false);
       }
     };
@@ -1846,6 +2157,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
     const captureSelection = () => {
       if (isBusy) return;
+      if (Date.now() < suppressCaptureUntil) return;
       if (manualEditTarget) return;
       const activeElement = frameDocument.activeElement;
       if (activeElement && pill.contains(activeElement)) return;
@@ -1921,6 +2233,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     if (highlightToggle) {
       addEvent(highlightToggle, 'click', (event: Event) => {
         event.preventDefault();
+        if (!savedRange || !selectedText) {
+          setError('Highlight text first, then click Add Note.');
+          return;
+        }
+        noteDraftRange = savedRange.cloneRange();
+        noteDraftText = selectedText;
         pill.classList.remove('cf-note-open', 'cf-prompt-open');
         pill.classList.add('cf-highlight-open');
         if (savedRange) {
@@ -1933,8 +2251,46 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     if (highlightForm) {
       addEvent(highlightForm, 'submit', (event: Event) => {
         event.preventDefault();
+        suppressCaptureFor(520);
         const note = highlightInput?.value?.trim() || '';
-        if (!note) return;
+        if (!note) {
+          setError('Enter a note before saving.');
+          return;
+        }
+        void createComplianceHighlight(note);
+      });
+      if (highlightInput) {
+        addEvent(highlightInput, 'keydown', (event: Event) => {
+          const keyEvent = event as KeyboardEvent;
+          if (keyEvent.key === 'Enter') {
+            keyEvent.preventDefault();
+            suppressCaptureFor(520);
+            const note = highlightInput.value?.trim() || '';
+            if (!note) {
+              setError('Enter a note before saving.');
+              return;
+            }
+            void createComplianceHighlight(note);
+          }
+        });
+      }
+    }
+
+    if (highlightSaveButton) {
+      addEvent(highlightSaveButton, 'pointerdown', (event: Event) => {
+        // Prevent pointerdown from collapsing iframe selection before click/submit.
+        event.preventDefault();
+        suppressCaptureFor(520);
+      });
+      addEvent(highlightSaveButton, 'click', (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        suppressCaptureFor(520);
+        const note = highlightInput?.value?.trim() || '';
+        if (!note) {
+          setError('Enter a note before saving.');
+          return;
+        }
         void createComplianceHighlight(note);
       });
     }
@@ -1979,12 +2335,61 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     addEvent(pill, 'mousedown', (event: Event) => {
       const target = event.target as HTMLElement | null;
       if (!target) return;
-      if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
+      // Keep mouse interactions inside the pill from triggering selection recapture/hide races.
+      suppressCaptureFor(280);
+      // Allow controls to behave normally.
+      if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA' && target.tagName !== 'BUTTON') {
         event.preventDefault();
       }
     });
 
-    addEvent(frameDocument, 'selectionchange', scheduleCaptureSelection);
+    // Click on a compliance highlight span → auto-select its text and show pill
+    addEvent(frameDocument, 'click', (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      const highlightSpan = target.closest('[data-cf-highlight-id]') as HTMLElement | null;
+      if (!highlightSpan) return;
+
+      const highlightId = highlightSpan.getAttribute('data-cf-highlight-id');
+      if (!highlightId) return;
+
+      // Find all spans sharing this highlight ID
+      const allSpans = Array.from(
+        frameDocument.querySelectorAll<HTMLElement>(`[data-cf-highlight-id="${highlightId}"]`)
+      );
+      if (allSpans.length === 0) return;
+
+      const firstSpan = allSpans[0];
+      const lastSpan = allSpans[allSpans.length - 1];
+
+      // Build a range spanning the entire highlight
+      const range = frameDocument.createRange();
+      range.setStartBefore(firstSpan.firstChild || firstSpan);
+      range.setEndAfter(lastSpan.lastChild || lastSpan);
+
+      const selection = frameWindow.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+
+      selectedText = range.toString().trim();
+      savedRange = range.cloneRange();
+
+      // Show the pill at this highlight
+      suppressCaptureFor(500);
+      pill.classList.remove('cf-note-open', 'cf-highlight-open', 'cf-prompt-open');
+      positionPill(savedRange);
+
+      // Also expand this note in the sidebar
+      const highlightData = complianceHighlightsRef.current?.find(
+        (h: any) => h.highlight_id === highlightId
+      );
+      if (highlightData) {
+        setExpandedNoteIds(prev => new Set(prev).add(highlightData.id));
+      }
+    });
+
     addEvent(frameDocument, 'mouseup', scheduleCaptureSelection);
     addEvent(frameDocument, 'pointerup', scheduleCaptureSelection);
     const touchOptions: AddEventListenerOptions = { passive: true };
@@ -2055,7 +2460,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       unbindFns.forEach(unbind => unbind());
       hidePill(true);
     };
-  }, [canAddComplianceHighlights, createContentVersion, normalizeRewriteText, profile?.id, profile?.org_id, stripIframeEditorInjection]);
+  }, [canAddComplianceHighlights, createContentVersion, isComplianceNoteOnlyPill, normalizeRewriteText, profile?.id, profile?.org_id, stripIframeEditorInjection]);
 
   const syncHighlightStatusInFrame = useCallback((doc: Document | null) => {
     if (!doc || complianceHighlights.length === 0) return;
@@ -2149,7 +2554,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     syncHighlightStatusAcrossFrames();
   }, [syncHighlightStatusAcrossFrames, stableIframeSrcDoc]);
 
-  const scrollToHighlight = useCallback((highlightId: string) => {
+  const scrollToHighlight = useCallback((highlightId: string, options?: { pulse?: boolean }) => {
     const frames = [iframeRef.current, fullscreenIframeRef.current].filter(Boolean) as HTMLIFrameElement[];
     for (const frame of frames) {
       const doc = frame.contentDocument;
@@ -2158,20 +2563,50 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const node = doc.querySelector<HTMLElement>(`[data-cf-highlight-id="${highlightId}"]`);
       if (!node) continue;
       node.classList.add('cf-focus-ring');
+      if (options?.pulse) {
+        node.classList.remove('cf-pulse');
+        void node.offsetWidth;
+        node.classList.add('cf-pulse');
+      }
       node.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-      win.setTimeout(() => node.classList.remove('cf-focus-ring'), 1800);
-      return;
+      win.setTimeout(() => {
+        node.classList.remove('cf-focus-ring');
+        node.classList.remove('cf-pulse');
+      }, 1800);
+      return true;
     }
+    return false;
   }, []);
 
-  const handleHighlightStatusChange = async (highlight: ComplianceHighlight, nextStatus: 'open' | 'resolved') => {
+
+
+  const handleHighlightStatusChange = async (highlight: InlineHighlight, nextStatus: 'open' | 'resolved') => {
+    if (highlight.local_state || highlight.id.startsWith('pending-')) return;
     if (!profile?.id) return;
+
+    let resNote: string | null = null;
+    if (nextStatus === 'resolved') {
+      // Automatically capture the current text inside the highlight spans
+      const frameDoc = document.querySelector('iframe')?.contentDocument;
+      if (frameDoc) {
+        const nodes = Array.from(frameDoc.querySelectorAll(`[data-cf-highlight-id="${highlight.highlight_id}"]`));
+        if (nodes.length > 0) {
+          const currentText = nodes.map(n => n.textContent).join('').replace(/\s+/g, ' ').trim();
+          resNote = `Changed to: "${currentText}"`;
+        } else {
+          resNote = "Text was replaced or removed.";
+        }
+      } else {
+        resNote = "Changes applied.";
+      }
+    }
+
     try {
       setUpdatingHighlightId(highlight.id);
       const payload =
         nextStatus === 'resolved'
-          ? { status: 'resolved', resolved_by: profile.id, resolved_at: new Date().toISOString() }
-          : { status: 'open', resolved_by: null, resolved_at: null };
+          ? { status: 'resolved', resolved_by: profile.id, resolution_note: resNote, resolved_at: new Date().toISOString() }
+          : { status: 'open', resolved_by: null, resolution_note: null, resolved_at: null };
 
       const { error: updateError } = await supabase
         .from('compliance_highlights')
@@ -2182,7 +2617,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       setComplianceHighlights(prev => prev.map(item => (
         item.id === highlight.id
-          ? { ...item, status: nextStatus, resolved_by: nextStatus === 'resolved' ? profile.id : null, resolved_at: nextStatus === 'resolved' ? new Date().toISOString() : null }
+          ? {
+            ...item,
+            status: nextStatus,
+            resolved_by: nextStatus === 'resolved' ? profile.id : null,
+            resolution_note: nextStatus === 'resolved' ? resNote : null,
+            resolved_at: nextStatus === 'resolved' ? new Date().toISOString() : null
+          }
           : item
       )));
       syncHighlightStatusAcrossFrames();
@@ -2282,7 +2723,28 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   Export HTML
                 </button>
               )}
-              {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED) && (
+              {isApprovedLocked ? (
+                /* When approved+locked, only show Unlock & Edit in the toolbar */
+                <button
+                  onClick={() => {
+                    if (window.confirm('Editing this document will remove its Approved status and require re-submission to Compliance. Continue?')) {
+                      setIsApprovedLocked(false);
+                      setStatus(ContentStatus.DRAFT);
+                      if (requestId) {
+                        supabase
+                          .from('content_requests')
+                          .update({ status: 'draft', updated_at: new Date().toISOString() })
+                          .eq('id', requestId)
+                          .then(() => { });
+                      }
+                    }
+                  }}
+                  className="flex items-center gap-2 bg-white border border-amber-200 text-amber-700 hover:bg-amber-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                >
+                  <Unlock size={16} />
+                  Unlock & Edit
+                </button>
+              ) : (status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED) && (
                 <>
                   <button
                     onClick={async () => {
@@ -2302,13 +2764,45 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     {isSavingDraft ? <Loader2 size={16} className="animate-spin" /> : <Clipboard size={16} />}
                     Save Draft
                   </button>
-                  <button
-                    onClick={() => handleStatusChange(ContentStatus.SUBMITTED)}
-                    disabled={!content}
-                    className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
-                  >
-                    {status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED ? 'Resubmit for Review' : 'Submit for Review'} <Send size={16} />
-                  </button>
+
+                  {savedClientName ? (
+                    <button
+                      onClick={() => handleStatusChange(ContentStatus.SUBMITTED)}
+                      disabled={!content}
+                      className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                    >
+                      {status === ContentStatus.CHANGES_REQUESTED && lastReviewerName
+                        ? `Resubmit to ${lastReviewerName}`
+                        : status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED
+                          ? 'Resubmit for Review'
+                          : 'Submit for Review'} <Send size={16} />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={async () => {
+                        setShowClientPicker(true);
+                        setClientsLoading(true);
+                        try {
+                          const { data, error: fetchError } = await supabase
+                            .from('clients')
+                            .select('*')
+                            .eq('org_id', profile?.org_id)
+                            .order('name');
+                          if (fetchError) throw fetchError;
+                          setClientsList(data || []);
+                        } catch (e: any) {
+                          console.error(e);
+                          setError('Failed to load clients.');
+                        } finally {
+                          setClientsLoading(false);
+                        }
+                      }}
+                      disabled={!content}
+                      className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                    >
+                      Assign to Client <UserPlus size={16} />
+                    </button>
+                  )}
                 </>
               )}
             </div>
@@ -2316,38 +2810,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             <StatusBadge status={status} />
           )}
 
-          {/* Save to Client — ALWAYS visible when content exists */}
-          {content && (
-            savedClientName ? (
-              <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-2 rounded-lg text-sm font-medium shadow-sm">
-                <CheckCircle2 size={16} />
-                Saved to {savedClientName}
-              </div>
-            ) : (
-              <button
-                onClick={async () => {
-                  setShowClientPicker(true);
-                  setClientsLoading(true);
-                  try {
-                    const { data, error: fetchError } = await supabase
-                      .from('clients')
-                      .select('*')
-                      .eq('org_id', profile?.org_id)
-                      .order('name');
-                    if (fetchError) throw fetchError;
-                    setClientsList(data || []);
-                  } catch (e: any) {
-                    console.error(e);
-                    setError('Failed to load clients.');
-                  } finally {
-                    setClientsLoading(false);
-                  }
-                }}
-                className="flex items-center gap-2 bg-white border border-primary-200 text-primary-700 hover:bg-primary-50 hover:border-primary-300 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
-              >
-                <UserPlus size={16} /> Save to Client
-              </button>
-            )
+          {/* Optional display for saved client name right next to status */}
+          {content && savedClientName && (
+            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-2 rounded-lg text-sm font-medium shadow-sm ml-2">
+              <CheckCircle2 size={16} />
+              Saved to {savedClientName}
+            </div>
           )}
         </div>
       </div>
@@ -2370,318 +2838,448 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           )}
 
           {userRole !== UserRole.COMPLIANCE && (
-            <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-200">
-              <h3 className="font-display font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                <Wand2 size={18} className="text-primary-500" /> Content Generator
-              </h3>
-
-              <div className="space-y-5">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Topic</label>
-                  <input
-                    type="text"
-                    className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
-                    value={topic}
-                    onChange={(e) => setTopic(e.target.value)}
-                    placeholder="Enter content topic..."
-                    disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED}
+            <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm transition-all duration-200">
+              <div
+                className={`flex items-center justify-between cursor-pointer group ${isGeneratorExpanded ? 'mb-6' : ''}`}
+                onClick={() => setIsGeneratorExpanded(!isGeneratorExpanded)}
+              >
+                <h3 className="font-semibold text-slate-900 flex items-center gap-2 text-lg">
+                  <Wand2 size={20} className="text-primary-600" />
+                  Content Generator
+                </h3>
+                <button
+                  type="button"
+                  className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors"
+                >
+                  <ChevronLeft
+                    size={20}
+                    className={`transition-transform duration-200 ${isGeneratorExpanded ? '-rotate-90' : ''}`}
                   />
-                </div>
+                </button>
+              </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Generation Mode</label>
-                  <div className="grid grid-cols-3 gap-2">
-                    <button
-                      onClick={() => setGenerationMode('text')}
-                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'text'
-                        ? 'bg-slate-900 text-white border-slate-900'
-                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                        }`}
-                    >
-                      Written Content
-                    </button>
-                    <button
-                      onClick={() => setGenerationMode('image')}
-                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'image'
-                        ? 'bg-slate-900 text-white border-slate-900'
-                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                        }`}
-                    >
-                      Visual Asset
-                    </button>
-                    <button
-                      onClick={() => setGenerationMode('both')}
-                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'both'
-                        ? 'bg-slate-900 text-white border-slate-900'
-                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                        }`}
-                    >
-                      Full Article
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
-                    {isVideoScript ? 'Video Length' : 'Length'}
-                  </label>
-                  <div className="grid grid-cols-3 gap-2">
-                    <button
-                      onClick={() => setContentLength('Short')}
-                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Short'
-                        ? 'bg-slate-900 text-white border-slate-900'
-                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                        }`}
-                    >
-                      {isVideoScript ? 'Short (1-3 min)' : 'Short'}
-                    </button>
-                    <button
-                      onClick={() => setContentLength('Medium')}
-                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Medium'
-                        ? 'bg-slate-900 text-white border-slate-900'
-                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                        }`}
-                    >
-                      {isVideoScript ? 'Medium (~8 min)' : 'Medium'}
-                    </button>
-                    <button
-                      onClick={() => setContentLength('Long')}
-                      className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Long'
-                        ? 'bg-slate-900 text-white border-slate-900'
-                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                        }`}
-                    >
-                      {isVideoScript ? 'Long (10+ min)' : 'Long'}
-                    </button>
+              {isGeneratorExpanded && (
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Topic</label>
+                    <input
+                      type="text"
+                      className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+                      value={topic}
+                      onChange={(e) => setTopic(e.target.value)}
+                      placeholder="Enter content topic..."
+                      disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED}
+                    />
                   </div>
 
-                  {/* Sub-duration selector for Video Script + Short */}
-                  {isVideoScript && contentLength === 'Short' && (
-                    <div className="mt-3">
-                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Duration (minutes)</label>
-                      <div className="grid grid-cols-3 gap-2">
-                        {([1, 2, 3] as const).map((min) => (
-                          <button
-                            key={min}
-                            onClick={() => setShortDuration(min)}
-                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${shortDuration === min
-                              ? 'bg-blue-600 text-white border-blue-600'
-                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                              }`}
-                          >
-                            {min} min
-                          </button>
-                        ))}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Generation Mode</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        onClick={() => setGenerationMode('text')}
+                        className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'text'
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                      >
+                        Written Content
+                      </button>
+                      <button
+                        onClick={() => setGenerationMode('image')}
+                        className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'image'
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                      >
+                        Visual Asset
+                      </button>
+                      <button
+                        onClick={() => setGenerationMode('both')}
+                        className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${generationMode === 'both'
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                      >
+                        Full Article
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                      {isVideoScript ? 'Video Length' : 'Length'}
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        onClick={() => setContentLength('Short')}
+                        className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Short'
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                      >
+                        {isVideoScript ? 'Short (1-3 min)' : 'Short'}
+                      </button>
+                      <button
+                        onClick={() => setContentLength('Medium')}
+                        className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Medium'
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                      >
+                        {isVideoScript ? 'Medium (~8 min)' : 'Medium'}
+                      </button>
+                      <button
+                        onClick={() => setContentLength('Long')}
+                        className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${contentLength === 'Long'
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                      >
+                        {isVideoScript ? 'Long (10+ min)' : 'Long'}
+                      </button>
+                    </div>
+
+                    {/* Sub-duration selector for Video Script + Short */}
+                    {isVideoScript && contentLength === 'Short' && (
+                      <div className="mt-3">
+                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Duration (minutes)</label>
+                        <div className="grid grid-cols-3 gap-2">
+                          {([1, 2, 3] as const).map((min) => (
+                            <button
+                              key={min}
+                              onClick={() => setShortDuration(min)}
+                              className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${shortDuration === min
+                                ? 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                }`}
+                            >
+                              {min} min
+                            </button>
+                          ))}
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1">Perfect for YouTube Shorts, Reels & TikTok</p>
                       </div>
-                      <p className="text-[10px] text-slate-400 mt-1">Perfect for YouTube Shorts, Reels & TikTok</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Format</label>
+                    <select
+                      value={contentType}
+                      onChange={(e) => setContentType(e.target.value)}
+                      className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
+                      disabled={isApprovedLocked || (status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED && status !== ContentStatus.APPROVED)}
+                    >
+                      <option value="blog">Blog Article</option>
+                      <option value="linkedin">LinkedIn Post</option>
+                      <option value="facebook">Facebook Post</option>
+                      <option value="video_script">Video Script</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Instructions</label>
+                    <textarea
+                      className="w-full p-3 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all h-32 resize-none"
+                      placeholder="E.g. Target audience is retirees. Tone should be reassuring."
+                      value={instructions}
+                      onChange={(e) => setInstructions(e.target.value)}
+                      disabled={isApprovedLocked || (status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED && status !== ContentStatus.APPROVED)}
+                    />
+                  </div>
+
+                  {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
+                    <div className="space-y-3">
+                      {(generationMode === 'text' || generationMode === 'both') && (
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Text Engine</label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              onClick={() => setTextProvider('claude')}
+                              className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'claude'
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                }`}
+                            >
+                              Claude
+                            </button>
+                            <button
+                              onClick={() => setTextProvider('kimi')}
+                              className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'kimi'
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                }`}
+                            >
+                              Kimi K2.5
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {(generationMode === 'image' || generationMode === 'both' || !!content) && (
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Image Engine</label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              onClick={() => setImageProvider('gemini')}
+                              className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'gemini'
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                }`}
+                            >
+                              Gemini
+                            </button>
+                            <button
+                              onClick={() => setImageProvider('chatgpt')}
+                              className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'chatgpt'
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                }`}
+                            >
+                              ChatGPT
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="mb-6">
+                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Number of Variations</label>
+                        <div className="flex gap-2">
+                          {[1, 2, 3, 4, 5, 6].map((num) => (
+                            <button
+                              key={num}
+                              onClick={() => setVariationCount(num)}
+                              className={`flex-1 py-1.5 rounded-lg text-xs font-medium border transition-all ${variationCount === num
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                }`}
+                            >
+                              {num}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={handleGenerate}
+                        disabled={isGenerating || isExtending}
+                        className="w-full py-2.5 bg-slate-900 text-white font-medium rounded-lg hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-70 flex justify-center items-center gap-2"
+                      >
+                        {isGenerating ? (
+                          <>Generating...</>
+                        ) : (
+                          <>Generate Draft</>
+                        )}
+                      </button>
+
+                      {!isGenerating && content && (
+                        <button
+                          onClick={handleExtend}
+                          disabled={isExtending}
+                          className="w-full py-2.5 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-70 flex justify-center items-center gap-2"
+                        >
+                          {isExtending ? (
+                            <>
+                              <Loader2 size={16} className="animate-spin" /> Extending...
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles size={16} className="text-violet-600" /> Extend Content
+                            </>
+                          )}
+                        </button>
+                      )}
+
+
                     </div>
                   )}
                 </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Format</label>
-                  <select
-                    value={contentType}
-                    onChange={(e) => setContentType(e.target.value)}
-                    className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
-                    disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED && status !== ContentStatus.APPROVED}
-                  >
-                    <option value="blog">Blog Article</option>
-                    <option value="linkedin">LinkedIn Post</option>
-                    <option value="facebook">Facebook Post</option>
-                    <option value="video_script">Video Script</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Instructions</label>
-                  <textarea
-                    className="w-full p-3 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all h-32 resize-none"
-                    placeholder="E.g. Target audience is retirees. Tone should be reassuring."
-                    value={instructions}
-                    onChange={(e) => setInstructions(e.target.value)}
-                    disabled={status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED && status !== ContentStatus.APPROVED}
-                  />
-                </div>
-
-                {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
-                  <div className="space-y-3">
-                    {(generationMode === 'text' || generationMode === 'both') && (
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Text Engine</label>
-                        <div className="grid grid-cols-2 gap-2">
-                          <button
-                            onClick={() => setTextProvider('claude')}
-                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'claude'
-                              ? 'bg-slate-900 text-white border-slate-900'
-                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                              }`}
-                          >
-                            Claude
-                          </button>
-                          <button
-                            onClick={() => setTextProvider('kimi')}
-                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${textProvider === 'kimi'
-                              ? 'bg-slate-900 text-white border-slate-900'
-                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                              }`}
-                          >
-                            Kimi K2.5
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                    {(generationMode === 'image' || generationMode === 'both' || !!content) && (
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Image Engine</label>
-                        <div className="grid grid-cols-2 gap-2">
-                          <button
-                            onClick={() => setImageProvider('gemini')}
-                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'gemini'
-                              ? 'bg-slate-900 text-white border-slate-900'
-                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                              }`}
-                          >
-                            Gemini
-                          </button>
-                          <button
-                            onClick={() => setImageProvider('chatgpt')}
-                            className={`px-3 py-2 rounded-lg text-xs font-medium border transition-all ${imageProvider === 'chatgpt'
-                              ? 'bg-slate-900 text-white border-slate-900'
-                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                              }`}
-                          >
-                            ChatGPT
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="mb-6">
-                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Number of Variations</label>
-                      <div className="flex gap-2">
-                        {[1, 2, 3, 4, 5, 6].map((num) => (
-                          <button
-                            key={num}
-                            onClick={() => setVariationCount(num)}
-                            className={`flex-1 py-1.5 rounded-lg text-xs font-medium border transition-all ${variationCount === num
-                              ? 'bg-slate-900 text-white border-slate-900'
-                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                              }`}
-                          >
-                            {num}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={handleGenerate}
-                      disabled={isGenerating || isExtending}
-                      className="w-full py-2.5 bg-slate-900 text-white font-medium rounded-lg hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-70 flex justify-center items-center gap-2"
-                    >
-                      {isGenerating ? (
-                        <>Generating...</>
-                      ) : (
-                        <>Generate Draft</>
-                      )}
-                    </button>
-
-                    {!isGenerating && content && (
-                      <button
-                        onClick={handleExtend}
-                        disabled={isExtending}
-                        className="w-full py-2.5 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-70 flex justify-center items-center gap-2"
-                      >
-                        {isExtending ? (
-                          <>
-                            <Loader2 size={16} className="animate-spin" /> Extending...
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles size={16} className="text-violet-600" /> Extend Content
-                          </>
-                        )}
-                      </button>
-                    )}
-
-
-                  </div>
-                )}
-              </div>
+              )}
             </div>
           )}
 
           {/* Compliance Feedback Card */}
           {reviews.length > 0 && (
             <div className={`rounded-xl p-5 border shadow-sm ${reviews[0].decision === 'approved' ? 'bg-emerald-50 border-emerald-100' : 'bg-amber-50 border-amber-100'}`}>
-              <h4 className={`font-semibold text-sm flex items-center gap-2 mb-3 ${reviews[0].decision === 'approved' ? 'text-emerald-900' : 'text-amber-900'}`}>
-                <MessageSquare size={16} /> Compliance Notes
-              </h4>
-              <div className={`bg-white/60 p-3 rounded-lg text-sm mb-2 border ${reviews[0].decision === 'approved' ? 'text-emerald-800 border-emerald-100/50' : 'text-amber-800 border-amber-100/50'}`}>
-                "{reviews[0].notes}"
-              </div>
-              <div className="flex justify-between items-center text-xs mt-3">
-                <span className={`font-medium ${reviews[0].decision === 'approved' ? 'text-emerald-700' : 'text-amber-700'}`}>Reviewer: Compliance Officer</span>
-                <StatusBadge status={reviews[0].decision === 'approved' ? ContentStatus.APPROVED : ContentStatus.CHANGES_REQUESTED} />
-              </div>
+              {reviews[0].decision === 'approved' ? (
+                <>
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-9 h-9 rounded-full bg-emerald-500 flex items-center justify-center shadow-sm">
+                      <ShieldCheck size={18} className="text-white" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-sm text-emerald-900">Compliance Approved</h4>
+                      <p className="text-[11px] text-emerald-600">
+                        {lastReviewerName || 'Compliance Officer'}
+                        {reviews[0].created_at
+                          ? ` · ${new Date(reviews[0].created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+                          : ''}
+                      </p>
+                    </div>
+                  </div>
+                  {reviews[0].notes && (
+                    <div className="bg-white/60 p-3 rounded-lg text-sm mb-2 border text-emerald-800 border-emerald-100/50">
+                      "{reviews[0].notes}"
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2 mt-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-100 px-2.5 py-1 rounded-full border border-emerald-200 flex items-center gap-1">
+                      <Check size={10} strokeWidth={3} /> Approved
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h4 className="font-semibold text-sm flex items-center gap-2 mb-3 text-amber-900">
+                    <MessageSquare size={16} /> Compliance Notes
+                  </h4>
+                  <div className="bg-white/60 p-3 rounded-lg text-sm mb-2 border text-amber-800 border-amber-100/50">
+                    "{reviews[0].notes}"
+                  </div>
+                  <div className="flex justify-between items-center text-xs mt-3">
+                    <span className="font-medium text-amber-700">
+                      Reviewer: {lastReviewerName || 'Compliance Officer'}
+                    </span>
+                    <StatusBadge status={ContentStatus.CHANGES_REQUESTED} />
+                  </div>
+                </>
+              )}
             </div>
           )}
 
           {(complianceHighlights.length > 0 || canAddComplianceHighlights) && (
-            <div className="bg-slate-50 rounded-xl p-5 border border-slate-200 shadow-sm">
-              <h4 className="font-semibold text-slate-900 text-sm flex items-center gap-2 mb-2">
-                <MessageSquare size={16} /> Inline Highlight Notes
-              </h4>
-              <p className="text-xs text-slate-500 mb-3">
-                Compliance can highlight text in the draft and leave exact change notes for advisors.
-              </p>
+            <div className="bg-slate-50 rounded-xl p-5 border border-slate-200 shadow-sm transition-all duration-200">
+              <div
+                className={`flex items-center justify-between cursor-pointer group ${isNotesListExpanded ? 'mb-2' : ''}`}
+                onClick={() => setIsNotesListExpanded(!isNotesListExpanded)}
+              >
+                <h4 className="font-semibold text-slate-900 text-sm flex items-center gap-2">
+                  <MessageSquare size={16} /> Inline Highlight Notes
+                  {complianceHighlights.filter(h => h.status === 'open').length > 0 && (
+                    <span className="ml-5 text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full">
+                      {complianceHighlights.filter(h => h.status === 'open').length} open
+                    </span>
+                  )}
+                </h4>
+                <button
+                  type="button"
+                  className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors"
+                >
+                  <ChevronLeft
+                    size={18}
+                    className={`transition-transform duration-200 ${isNotesListExpanded ? '-rotate-90' : ''}`}
+                  />
+                </button>
+              </div>
 
-              {complianceHighlights.length === 0 ? (
-                <div className="text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-3 py-2">
-                  No inline notes yet.
-                </div>
-              ) : (
-                <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-                  {complianceHighlights.map((item) => (
-                    <div key={item.id} className="bg-white border border-slate-200 rounded-lg p-3">
-                      <div className="flex items-center justify-between gap-2 mb-2">
-                        <span className={`text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full ${item.status === 'resolved' ? 'bg-slate-100 text-slate-600' : 'bg-amber-100 text-amber-800'}`}>
-                          {item.status}
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          {new Date(item.created_at).toLocaleString()}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-500 mb-1">"{item.selected_text}"</p>
-                      <p className="text-sm text-slate-700 leading-relaxed mb-3">{item.note}</p>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => scrollToHighlight(item.highlight_id)}
-                          className="text-xs font-medium px-2.5 py-1.5 rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50"
-                        >
-                          Jump to Highlight
-                        </button>
-                        {canResolveComplianceHighlights && (
-                          <button
-                            onClick={() => handleHighlightStatusChange(item, item.status === 'resolved' ? 'open' : 'resolved')}
-                            disabled={updatingHighlightId === item.id}
-                            className={`text-xs font-medium px-2.5 py-1.5 rounded-md border disabled:opacity-60 ${item.status === 'resolved'
-                              ? 'border-slate-300 text-slate-700 hover:bg-slate-50'
-                              : 'border-emerald-300 text-emerald-700 hover:bg-emerald-50'
-                              }`}
-                          >
-                            {updatingHighlightId === item.id
-                              ? 'Saving...'
-                              : item.status === 'resolved'
-                                ? 'Reopen'
-                                : 'Mark Resolved'}
-                          </button>
-                        )}
-                      </div>
+              {isNotesListExpanded && (
+                <>
+                  <p className="text-xs text-slate-500 mb-3">
+                    {userRole === UserRole.ADVISOR
+                      ? 'Compliance has highlighted text and left notes. Click each note to jump to the highlighted section.'
+                      : 'Compliance can highlight text in the draft and leave exact change notes for advisors.'}
+                  </p>
+
+                  {complianceHighlights.length === 0 ? (
+                    <div className="text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-3 py-2">
+                      No inline notes yet.
                     </div>
-                  ))}
-                </div>
+                  ) : (
+                    <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                      {complianceHighlights.map((item, index) => {
+                        const isActive = expandedNoteIds.has(item.id);
+                        const isSaving = item.local_state === 'saving';
+                        const isError = item.local_state === 'error';
+                        const statusLabel = isError ? 'error' : isSaving ? 'saving' : item.status;
+                        const excerpt = item.selected_text.length > 70
+                          ? `${item.selected_text.slice(0, 70)}...`
+                          : item.selected_text;
+
+                        return (
+                          <div key={item.id} className={`bg-white border rounded-lg ${isActive ? 'border-amber-300' : 'border-slate-200'}`}>
+                            <button
+                              onClick={() => {
+                                setExpandedNoteIds(prev => {
+                                  const next = new Set(prev);
+                                  if (next.has(item.id)) {
+                                    next.delete(item.id);
+                                  } else {
+                                    next.add(item.id);
+                                  }
+                                  return next;
+                                });
+                                if (!expandedNoteIds.has(item.id)) {
+                                  scrollToHighlight(item.highlight_id, { pulse: true });
+                                }
+                              }}
+                              className="w-full px-3 py-2.5 text-left flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold text-slate-800 truncate">Note {complianceHighlights.length - index}</p>
+                                <p className="text-[11px] text-slate-500 truncate">"{excerpt}"</p>
+                              </div>
+                              <span className={`shrink-0 text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full ${statusLabel === 'resolved'
+                                ? 'bg-slate-100 text-slate-600'
+                                : statusLabel === 'saving'
+                                  ? 'bg-blue-100 text-blue-700'
+                                  : statusLabel === 'error'
+                                    ? 'bg-red-100 text-red-700'
+                                    : 'bg-amber-100 text-amber-800'
+                                }`}>
+                                {statusLabel}
+                              </span>
+                            </button>
+
+                            {isActive && (
+                              <div className="px-3 pb-3 border-t border-slate-100">
+                                <p className="text-[10px] text-slate-400 mt-2 mb-2">
+                                  {new Date(item.created_at).toLocaleString()}
+                                </p>
+                                {isError && (
+                                  <div className="mb-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-2 py-1.5">
+                                    {item.local_error || 'Failed to save this inline note.'}
+                                  </div>
+                                )}
+                                <p className="text-xs text-slate-500 mb-1">"{item.selected_text}"</p>
+                                <p className="text-sm font-semibold text-red-600 bg-red-50 border border-red-100 rounded-md px-2.5 py-1.5 leading-relaxed mb-3 select-text">{item.note}</p>
+
+                                {item.status === 'resolved' && item.resolution_note && (
+                                  <div className="mb-4 bg-emerald-50 border border-emerald-100 rounded-md px-2.5 py-2">
+                                    <p className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider mb-1">Advisor Changelog</p>
+                                    <p className="text-sm text-emerald-800 leading-relaxed select-text">{item.resolution_note}</p>
+                                  </div>
+                                )}
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => scrollToHighlight(item.highlight_id, { pulse: true })}
+                                    className="text-xs font-medium px-2.5 py-1.5 rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50"
+                                  >
+                                    Jump to Highlight
+                                  </button>
+                                  {canResolveComplianceHighlights && !isSaving && !isError && (
+                                    <button
+                                      onClick={() => handleHighlightStatusChange(item, item.status === 'resolved' ? 'open' : 'resolved')}
+                                      disabled={updatingHighlightId === item.id}
+                                      className={`text-xs font-medium px-2.5 py-1.5 rounded-md border disabled:opacity-60 ${item.status === 'resolved'
+                                        ? 'border-slate-300 text-slate-700 hover:bg-slate-50'
+                                        : 'border-emerald-300 text-emerald-700 hover:bg-emerald-50'
+                                        }`}
+                                    >
+                                      {updatingHighlightId === item.id
+                                        ? 'Saving...'
+                                        : item.status === 'resolved'
+                                          ? 'Reopen'
+                                          : 'Mark Resolved'}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -2812,7 +3410,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               <div className="w-full flex flex-col h-full bg-slate-50/50 p-6">
                 <textarea
                   ref={titleRef}
-                  className="w-full text-4xl font-display font-bold mb-6 border-none focus:ring-0 placeholder-slate-300 text-slate-900 p-0 resize-none overflow-hidden bg-transparent"
+                  className="w-full text-5xl font-extrabold mb-6 border-none focus:ring-0 placeholder-slate-300 text-slate-900 p-0 resize-none overflow-hidden bg-transparent leading-tight tracking-tight"
+                  style={{ fontWeight: 800, fontSize: '2.8rem', lineHeight: 1.15, letterSpacing: '-0.02em' }}
                   value={content.title}
                   onChange={(e) => {
                     setContent({ ...content, title: e.target.value });
@@ -2827,33 +3426,57 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   }}
                   placeholder="Untitled Document"
                 />
-                {content.body.includes('<!DOCTYPE html>') ? (
-                  <div className="w-full relative border border-slate-200 rounded-xl overflow-hidden shadow-sm mt-4 bg-white group flex-1 min-h-[800px]">
+
+                {/* Approval Banner */}
+                {status === ContentStatus.APPROVED && isApprovedLocked && (
+                  <div className="mt-4 flex items-center gap-3 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl px-5 py-3.5 shadow-sm">
+                    <div className="w-10 h-10 rounded-full bg-emerald-500 flex items-center justify-center shadow-sm">
+                      <ShieldCheck size={20} className="text-white" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold text-emerald-800">
+                        Compliance Approved
+                      </p>
+                      <p className="text-xs text-emerald-600">
+                        {lastReviewerName ? `Approved by ${lastReviewerName}` : 'Approved by Compliance'}
+                        {reviews.length > 0 && reviews[0].decision === 'approved' && reviews[0].created_at
+                          ? ` on ${new Date(reviews[0].created_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`
+                          : ''
+                        }
+                        . Ready to publish.
+                      </p>
+                    </div>
                     <button
-                      onClick={() => setShowFullPreview(true)}
-                      className="absolute top-4 right-4 z-10 bg-slate-900/80 hover:bg-slate-900 text-white p-2 rounded-lg shadow-md backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-2"
+                      onClick={() => {
+                        if (window.confirm('Editing this document will remove its Approved status and require re-submission to Compliance. Continue?')) {
+                          setIsApprovedLocked(false);
+                          setStatus(ContentStatus.DRAFT);
+                          // Update in DB
+                          if (requestId) {
+                            supabase
+                              .from('content_requests')
+                              .update({ status: 'draft', updated_at: new Date().toISOString() })
+                              .eq('id', requestId)
+                              .then(() => { });
+                          }
+                        }
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition-colors"
                     >
-                      <Maximize2 size={16} /> <span className="text-sm font-medium pr-1">Expand Preview</span>
+                      <Unlock size={13} />
+                      Unlock & Edit
                     </button>
-                    <iframe
-                      ref={iframeRef}
-                      srcDoc={stableIframeSrcDoc}
-                      onLoad={handleMainIframeLoad}
-                      title="Blog Preview"
-                      className="w-full h-full border-none bg-white"
-                      sandbox="allow-scripts allow-same-origin"
-                    />
                   </div>
-                ) : (
-                  <div
-                    ref={editorRef}
-                    className="prose prose-slate prose-lg max-w-none focus:outline-none min-h-[300px]"
-                    contentEditable
-                    suppressContentEditableWarning
-                    dangerouslySetInnerHTML={{ __html: content.body }}
-                    onBlur={(e) => setContent({ ...content, body: e.currentTarget.innerHTML })}
-                  />
                 )}
+
+                <div
+                  ref={editorRef}
+                  className="shrink-0 prose prose-slate prose-lg max-w-none focus:outline-none min-h-[300px] bg-white rounded-xl border border-slate-200 p-8 shadow-sm flow-root [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded-lg [&_img]:my-4"
+                  contentEditable
+                  suppressContentEditableWarning
+                  dangerouslySetInnerHTML={{ __html: content.body }}
+                  onBlur={(e) => setContent({ ...content, body: e.currentTarget.innerHTML })}
+                />
 
                 {/* Generate Image Button (Only if no image present or as an option) */}
                 {(generationMode === 'text' || generationMode === 'both') && !isExtending && !isGenerating && (
@@ -2884,7 +3507,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                 )}
 
                 {content.disclaimers && (
-                  <div className="mt-12 pt-8 border-t border-slate-100">
+                  <div className="shrink-0 mt-12 pt-8 border-t border-slate-100">
                     <h5 className="text-xs font-semibold uppercase text-slate-400 mb-3 flex items-center gap-2">
                       <AlertTriangle size={14} /> Required Disclaimers
                     </h5>
@@ -2896,63 +3519,130 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
                 {/* Data Visualizations Section */}
                 {chartData && (
-                  <div className="mt-12 pt-8 border-t border-slate-100">
-                    <h5 className="text-lg font-display font-semibold text-slate-900 mb-6 flex items-center gap-2">
-                      <BarChart3 size={20} className="text-indigo-500" />
-                      Data Visualizations
-                    </h5>
+                  <div className="shrink-0 mt-12 pt-8 border-t border-slate-100">
+                    <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
+                      {/* Chart Title */}
+                      <h3 style={{ fontFamily: "'Georgia', serif", fontSize: '1.35rem', fontWeight: 700, color: '#0f172a', margin: '0 0 6px 0' }}>
+                        {chartData.title || 'Data Overview'}
+                      </h3>
+                      {/* Chart Subtitle */}
+                      {chartData.subtitle && (
+                        <p style={{ fontSize: '0.85rem', color: '#64748b', margin: '0 0 24px 0', lineHeight: 1.5 }}>
+                          {chartData.subtitle}
+                        </p>
+                      )}
 
-                    <div className="bg-white border text-slate-800 border-slate-200 rounded-xl p-6 shadow-sm">
-                      <h6 className="font-semibold text-slate-800 text-center mb-6">{chartData.title || 'Market Trends'}</h6>
-
-                      <div className="w-full h-[300px]">
+                      <div className="w-full" style={{ height: chartData.type === 'horizontalBar' ? `${Math.max(300, (chartData.data?.length || 5) * 55)}px` : '360px' }}>
                         <ResponsiveContainer width="100%" height="100%">
-                          {chartData.type === 'line' ? (
-                            <LineChart data={chartData.data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                          {/* STACKED BAR CHART */}
+                          {chartData.type === 'stackedBar' ? (
+                            <BarChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
                               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} dy={10} />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} />
-                              <Tooltip
-                                contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)' }}
-                              />
-                              <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                              <Line type="monotone" dataKey="value" stroke="#6366f1" strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} name={chartData.dataLabel || "Value"} />
-                              {chartData.dataKey2 && <Line type="monotone" dataKey="value2" stroke="#10b981" strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} name={chartData.dataLabel2 || "Value 2"} />}
+                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                              {(chartData.stackKeys || ['value', 'value2', 'value3']).map((key: string, i: number) => (
+                                <Bar key={key} dataKey={key} stackId="a" fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][i % 6]} name={chartData.stackLabels?.[i] || key} />
+                              ))}
+                            </BarChart>
+
+                          /* HORIZONTAL BAR CHART */
+                          ) : chartData.type === 'horizontalBar' ? (
+                            <BarChart data={chartData.data} layout="vertical" margin={{ top: 10, right: 30, bottom: 10, left: 20 }}>
+                              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
+                              <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
+                              <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#334155' }} width={160} />
+                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                              <Bar dataKey="value" radius={[0, 4, 4, 0]} name={chartData.dataLabel || 'Value'}>
+                                {chartData.data.map((_entry: any, index: number) => (
+                                  <Cell key={`cell-${index}`} fill={['#1a365f', '#1f2758', '#7a2828', '#b3822f', '#4c6b36', '#1f5c7a', '#83a762'][index % 7]} />
+                                ))}
+                              </Bar>
+                            </BarChart>
+
+                          /* AREA LINE CHART (line with shaded area fill) */
+                          ) : chartData.type === 'areaLine' ? (
+                            <AreaChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                              <defs>
+                                <linearGradient id="areaFill1" x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="5%" stopColor="#7a2828" stopOpacity={0.15} />
+                                  <stop offset="95%" stopColor="#7a2828" stopOpacity={0.02} />
+                                </linearGradient>
+                              </defs>
+                              <Area type="monotone" dataKey="value" stroke="#7a2828" strokeWidth={2.5} fill="url(#areaFill1)" dot={{ r: 4, fill: '#7a2828', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={chartData.dataLabel || 'Value'} />
+                              {chartData.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel2 || 'Value 2'} />}
+                              {chartData.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel3 || 'Value 3'} />}
+                            </AreaChart>
+
+                          /* MULTI-LINE CHART with area fills */
+                          ) : chartData.type === 'multiLine' ? (
+                            <AreaChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                              <defs>
+                                <linearGradient id="mlFill1" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#1a365f" stopOpacity={0.12}/><stop offset="95%" stopColor="#1a365f" stopOpacity={0.01}/></linearGradient>
+                                <linearGradient id="mlFill2" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#b3822f" stopOpacity={0.12}/><stop offset="95%" stopColor="#b3822f" stopOpacity={0.01}/></linearGradient>
+                                <linearGradient id="mlFill3" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4c6b36" stopOpacity={0.12}/><stop offset="95%" stopColor="#4c6b36" stopOpacity={0.01}/></linearGradient>
+                              </defs>
+                              <Area type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} fill="url(#mlFill1)" dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel || 'Series 1'} />
+                              {chartData.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill="url(#mlFill2)" dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel2 || 'Series 2'} />}
+                              {chartData.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill="url(#mlFill3)" dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel3 || 'Series 3'} />}
+                            </AreaChart>
+
+                          /* STANDARD LINE CHART */
+                          ) : chartData.type === 'line' ? (
+                            <LineChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
+                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                              <Line type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={chartData.dataLabel || 'Value'} />
+                              {chartData.dataKey2 && <Line type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={chartData.dataLabel2 || 'Value 2'} />}
                             </LineChart>
+
+                          /* PIE CHART */
                           ) : chartData.type === 'pie' ? (
                             <PieChart>
-                              <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                              <Legend />
-                              <Pie
-                                data={chartData.data}
-                                cx="50%"
-                                cy="50%"
-                                innerRadius={60}
-                                outerRadius={90}
-                                paddingAngle={5}
-                                dataKey="value"
-                              >
-                                {chartData.data.map((entry: any, index: number) => (
-                                  <Cell key={`cell-${index}`} fill={['#6366f1', '#8b5cf6', '#ec4899', '#10b981', '#f59e0b'][index % 5]} />
+                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                              <Legend wrapperStyle={{ fontSize: '13px' }} />
+                              <Pie data={chartData.data} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={3} dataKey="value">
+                                {chartData.data.map((_entry: any, index: number) => (
+                                  <Cell key={`cell-${index}`} fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][index % 6]} />
                                 ))}
                               </Pie>
                             </PieChart>
+
+                          /* DEFAULT: GROUPED BAR CHART */
                           ) : (
-                            <BarChart data={chartData.data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                            <BarChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
                               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} dy={10} />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} />
-                              <Tooltip
-                                cursor={{ fill: '#f8fafc' }}
-                                contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                              />
-                              <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                              <Bar dataKey="value" fill="#6366f1" radius={[4, 4, 0, 0]} name={chartData.dataLabel || "Value"} />
-                              {chartData.dataKey2 && <Bar dataKey="value2" fill="#10b981" radius={[4, 4, 0, 0]} name={chartData.dataLabel2 || "Value 2"} />}
+                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={chartData.yAxisPercent ? ((v: number) => `${v}%`) : undefined} />
+                              <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={chartData.yAxisPercent ? ((value: number) => `${value}%`) : undefined} />
+                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                              <Bar dataKey="value" fill="#1a365f" radius={[4, 4, 0, 0]} name={chartData.dataLabel || 'Value'} />
+                              {chartData.dataKey2 && <Bar dataKey="value2" fill="#b3822f" radius={[4, 4, 0, 0]} name={chartData.dataLabel2 || 'Value 2'} />}
                             </BarChart>
                           )}
                         </ResponsiveContainer>
                       </div>
+
+                      {/* Source Citation */}
+                      {chartData.source && (
+                        <p style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic', marginTop: '16px', lineHeight: 1.5 }}>
+                          {chartData.source}
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -3241,6 +3931,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                               if (shareErr) throw shareErr;
 
                               setSavedClientName(client.name);
+                              setSavedClientId(client.id);
                               setShowClientPicker(false);
                               setClientSearch('');
                             } catch (e: any) {
@@ -3353,7 +4044,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                 Cancel
               </button>
               <button
-                onClick={handleConfirmReviewSubmit}
+                onClick={() => handleConfirmReviewSubmit()}
                 disabled={!selectedReviewer || isSavingDraft}
                 className="flex-[2] px-4 py-2.5 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-xl shadow-lg shadow-primary-500/25 transition-all flex items-center justify-center gap-2"
               >

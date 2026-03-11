@@ -35,49 +35,37 @@ You are a senior wealth advisor at Legacy Wealth Management writing a premium bl
 Tone: Professional, educational, authoritative, yet accessible. NOT salesy.
 
 IMPORTANT OUTPUT FORMAT:
-You MUST output your blog using the following structured format with exact markers. Do NOT output raw HTML.
+Write your blog as clean markdown. Do NOT use any structured markers, tags, or HTML.
 
----TITLE---
-[Your compelling blog post title here]
----SUBTITLE---
-[A one-sentence subtitle/meta description]
----CATEGORY---
-[One word category like: INVESTING, PLANNING, TAX, RETIREMENT, ESTATE, MARKETS, RISK]
----READ_TIME---
-[Estimated read time like: 8 MIN READ]
----LEAD---
-[An italicized lead paragraph that hooks the reader — 2-3 sentences max]
----SECTION---
-## Section Heading
-[2-4 paragraphs of flowing, human narrative content. Use **bold** for emphasis.]
----SECTION---
-## Another Section Heading
-[More content...]
----PULLQUOTE---
-[A powerful, memorable quote from the article — 1-2 sentences]
-[Attribution — e.g., "LEGACY WEALTH MANAGEMENT"]
----SECTION---
-## Another Section Heading
-[Continue with more sections as needed...]
----INSIGHT---
-[A key insight or actionable takeaway — 1-2 sentences]
----SECTION---
-## Final Section Heading
-[Concluding section content — do NOT use "In conclusion" — just naturally wrap up.]
----STATS---
-[stat1_number]|[stat1_label]
-[stat2_number]|[stat2_label]
-[stat3_number]|[stat3_label]
----DISCLAIMER---
-[Standard investment disclaimer text]
+# Blog Title Here
+
+*A short subtitle or hook sentence in italics.*
+
+## First Section Heading
+
+Write 2-4 paragraphs of flowing narrative. Use **bold** for key terms.
+
+Separate each paragraph with a blank line.
+
+## Second Section Heading
+
+More flowing content here...
+
+## Continue with 3-5 sections total
+
+More content as needed...
 
 Rules:
-- Write in a flowing, human narrative. No AI-isms.
-- DO NOT use bullet points with dashes/hyphens.
-- You MUST include at least 3-5 ---SECTION--- blocks.
-- You MUST include exactly one ---PULLQUOTE--- block.
-- You MUST include exactly one ---INSIGHT--- block.
-- The ---STATS--- block should have exactly 3 stats relevant to the topic.
+- Start with # for the main title (one title only).
+- Use ## for each section heading.
+- Use **bold** for emphasis within paragraphs.
+- Write in a flowing, human narrative. No AI-isms (avoid "In conclusion", "Delve", "Tapestry").
+- DO NOT use bullet points with dashes/hyphens in the article body.
+- DO NOT include disclaimers, stats blocks, or legal text.
+- DO NOT include category labels, read time, or any metadata.
+- DO NOT use any ---MARKER--- tags.
+- Include at least 3-5 ## section headings.
+- Separate every paragraph and heading with a blank line.
 - Focus on wealth preservation, endowments, and alternative investments.
 `;
 
@@ -912,7 +900,7 @@ serve(async (req) => {
       let imagePrompt = `Create a premium financial marketing visual for "${topic}".
 Content type: ${contentType || "marketing visual"}.
 Creative direction: ${instructions || "Clean, bold, high-contrast, professional financial aesthetic"}.
-Output style: polished, trustworthy, modern.
+Output style: polished, trustworthy, modern. Must be full color, not black-and-white.
 Include no logos, no copyrighted trademarks, and no misleading claims in text.`;
 
       if (currentContent) {
@@ -987,7 +975,7 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
     const isBlogType = contentType && contentType.toLowerCase() === 'blog';
     let systemPrompt = isBlogType ? legacyWealthBlogStyle : legacyWealthStyle;
     let userContent = isBlogType
-      ? `Write a premium blog article about: ${topic}.\n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}\n\nRemember: Use the exact structured format with ---TITLE---, ---SUBTITLE---, ---CATEGORY---, ---READ_TIME---, ---LEAD---, ---SECTION---, ---PULLQUOTE---, ---INSIGHT---, ---STATS---, and ---DISCLAIMER--- markers.\n\nIf the topic involves data, trends, asset allocation, or comparisons, also append a JSON block at the very end formatted like:\n<script type="application/json" id="chart-data">\n{"title": "Chart Title", "type": "bar", "dataLabel": "Metric", "data": [{"name": "A", "value": 10}]}\n</script>`
+      ? `Write a premium blog article about: ${topic}.\n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}\n\nRemember: Write in clean markdown with # for title, ## for section headings, and regular paragraphs. Do NOT use ---MARKER--- tags.\n\nIf the topic involves data, trends, asset allocation, or comparisons, you MUST also append a JSON chart block at the very end of your response. Choose the most appropriate chart type from these options:\n\n1. "bar" — standard vertical bar chart (default, good for simple comparisons)\n2. "stackedBar" — stacked vertical bars (good for composition breakdowns like asset allocation). Requires stackKeys and stackLabels arrays.\n3. "horizontalBar" — horizontal bars (good for ranking/factor comparisons, each bar gets a unique color)\n4. "areaLine" — line with shaded area fill (good for trends over time, probability curves)\n5. "multiLine" — multiple lines with subtle area fills (good for glide paths, multi-series time data). Use dataKey2/dataKey3 for additional series.\n6. "line" — standard line chart (good for simple trends)\n7. "pie" — donut/pie chart\n\nFormat the JSON exactly like this:\n<script type="application/json" id="chart-data">\n{"title": "Chart Title", "subtitle": "One-line description of what data shows", "type": "bar", "dataLabel": "Series Name", "source": "Source: Research Group; Data Provider. Note about methodology.", "data": [{"name": "A", "value": 10}]}\n</script>\n\nStacked bar example: {"type": "stackedBar", "stackKeys": ["value", "value2", "value3"], "stackLabels": ["Equities", "Fixed Income", "Cash / Alts."], "data": [{"name": "Conservative", "value": 20, "value2": 65, "value3": 15}]}\nGrouped bar example: {"type": "bar", "dataKey2": "value2", "dataLabel": "Fund Return", "dataLabel2": "Investor Return", "yAxisPercent": true, "data": [{"name": "U.S. Equity", "value": 9.8, "value2": 7.9}]}\nMulti-line example: {"type": "multiLine", "dataKey2": "value2", "dataKey3": "value3", "dataLabel": "Equities (%)", "dataLabel2": "Fixed Income (%)", "dataLabel3": "Cash (%)", "data": [{"name": "Age 25", "value": 95, "value2": 4, "value3": 1}]}\nArea-line example: {"type": "areaLine", "dataLabel": "Historical Frequency (%)", "data": [{"name": "1 Year", "value": 29}]}`
       : `Write a ${contentType} about ${topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}
 
 If the topic involves data, trends, asset allocation, or comparisons, you MUST append a JSON block to the very end of your response formatted exactly like this:
@@ -1150,7 +1138,7 @@ IMPORTANT: Return ONLY the rewritten passage.
       let htmlBody: string;
       let finalTitle = title;
 
-      // Check if this is a blog — use the LWM template
+      // Check if this is a blog — convert markdown to clean simple HTML (white bg, black text)
       if (isBlogType) {
         // Extract chart data before parsing
         const chartRegex = /<script[^>]*id=["']chart-data["'][^>]*>([\s\S]*?)<\/script>/i;
@@ -1165,17 +1153,70 @@ IMPORTANT: Return ONLY the rewritten passage.
           bodyForParsing = body.replace(chartMatch[0], '').trim();
         }
 
-        let parsed: any;
-        if (bodyForParsing.includes('---SECTION---') || bodyForParsing.includes('---TITLE---')) {
-          const fullStructured = bodyForParsing.includes('---TITLE---') ? bodyForParsing : `---TITLE---\n${title}\n${bodyForParsing}`;
-          parsed = parseStructuredBlog(fullStructured, topic);
-        } else {
-          parsed = parseUnstructuredBlog(title, bodyForParsing);
+        // Strip any leftover structured markers (---TITLE---, ---SECTION---, etc.)
+        let cleanText = bodyForParsing;
+        cleanText = cleanText.replace(/---[A-Z_]+---/g, '').trim();
+
+        // Process line by line to properly detect headers even with single line breaks
+        const outputParts: string[] = [];
+        const allLines = cleanText.split('\n');
+        let currentParagraph: string[] = [];
+
+        const flushParagraph = () => {
+          if (currentParagraph.length > 0) {
+            const text = currentParagraph.join(' ').trim();
+            if (text) {
+              outputParts.push(`<p style="margin-bottom: 20px; line-height: 1.8; color: #334155;">${text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.*?)\*/g, '<em>$1</em>')}</p>`);
+            }
+            currentParagraph = [];
+          }
+        };
+
+        for (const line of allLines) {
+          const trimmed = line.trim();
+
+          // Skip empty lines (they signal paragraph breaks)
+          if (!trimmed) {
+            flushParagraph();
+            continue;
+          }
+
+          // Detect headers
+          if (trimmed.startsWith('### ')) {
+            flushParagraph();
+            const text = trimmed.replace(/^###\s*/, '').replace(/\*\*/g, '');
+            outputParts.push(`<h3 style="font-size: 1.1rem; font-weight: 700; color: #1e293b; margin-top: 32px; margin-bottom: 12px;">${text}</h3>`);
+          } else if (trimmed.startsWith('## ')) {
+            flushParagraph();
+            const text = trimmed.replace(/^##\s*/, '').replace(/\*\*/g, '');
+            outputParts.push(`<h2 style="font-size: 1.4rem; font-weight: 700; color: #0f172a; margin-top: 40px; margin-bottom: 16px;">${text}</h2>`);
+          } else if (trimmed.startsWith('# ')) {
+            flushParagraph();
+            const text = trimmed.replace(/^#\s*/, '').replace(/\*\*/g, '');
+            if (!finalTitle || finalTitle === title) {
+              finalTitle = text;
+            }
+            outputParts.push(`<h1 style="font-size: 1.8rem; font-weight: 800; color: #0f172a; margin-top: 0; margin-bottom: 8px;">${text}</h1>`);
+          } else {
+            // Regular text line — accumulate into paragraph
+            currentParagraph.push(trimmed);
+          }
+        }
+        flushParagraph();
+
+        htmlBody = outputParts.join('\n');
+
+        if (!htmlBody) {
+          htmlBody = '<p>No content generated.</p>';
         }
 
-        if (chartData) parsed.chartData = chartData;
-        finalTitle = parsed.title;
-        htmlBody = buildLwmBlogHtml(parsed);
+        // Prepend the title as a big bold heading at the very top of the body
+        htmlBody = `<h1 style="font-size: 2.2rem; font-weight: 800; color: #0f172a; margin-top: 0; margin-bottom: 20px; line-height: 1.15; letter-spacing: -0.02em;">${finalTitle}</h1>\n` + htmlBody;
+
+        // Append chart data as a script tag so the frontend can extract it
+        if (chartData) {
+          htmlBody += `\n<script type="application/json" id="chart-data">\n${JSON.stringify(chartData)}\n</script>`;
+        }
       } else {
         // Non-blog: use existing simple HTML formatting
         htmlBody = body.split("\n\n").map((block: string) => {
@@ -1207,7 +1248,7 @@ IMPORTANT: Return ONLY the rewritten passage.
         id: res.id,
         title: finalTitle,
         body: htmlBody || "<p>No content generated.</p>",
-        disclaimers: `Generated by ${textProvider === 'kimi' ? 'Kimi K2.5' : 'Claude'}`,
+        disclaimers: "",
       };
     });
 
@@ -1218,7 +1259,7 @@ IMPORTANT: Return ONLY the rewritten passage.
           data: {
             title: "",
             body: successfulResults[0].text,
-            disclaimers: `Generated by ${textProvider === 'kimi' ? 'Kimi K2.5' : 'Claude'}`,
+            disclaimers: "",
           },
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
