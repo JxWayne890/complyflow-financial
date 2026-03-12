@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, ChevronRight, TrendingUp, DollarSign, Heart, Briefcase, Zap, Shield, Landmark, Building2, Flame, Leaf, Atom, PiggyBank, Users, BookOpen, Scale, Sparkles, Loader2, CheckCircle2, Brain, ShieldCheck, Lightbulb, ListChecks, FileCheck } from 'lucide-react';
+import { Search, ChevronRight, TrendingUp, DollarSign, Heart, Briefcase, Zap, Shield, Landmark, Building2, Flame, Leaf, Atom, PiggyBank, Users, BookOpen, Scale, Sparkles, Loader2, CheckCircle2, Brain, ShieldCheck, Lightbulb, ListChecks, FileCheck, PlusCircle } from 'lucide-react';
 import { supabase } from '../services/supabaseClient';
 import { triggerTopicGeneration } from '../services/supabaseClient';
-import { Profile } from '../types';
+import { Profile, UserRole } from '../types';
 
 // Generation progress steps
 const TOPIC_GEN_STEPS = [
@@ -61,9 +61,14 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
   const [topicProvider, setTopicProvider] = useState<TopicProvider>('claude');
   const [isGeneratingTopics, setIsGeneratingTopics] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [customTopicError, setCustomTopicError] = useState<string | null>(null);
+  const [customTopicSuccess, setCustomTopicSuccess] = useState<string | null>(null);
   const [genStep, setGenStep] = useState(0);
   const genStepTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [loadingTopics, setLoadingTopics] = useState(true);
+  const [customTopic, setCustomTopic] = useState('');
+  const [customCategory, setCustomCategory] = useState('Personal Finance');
+  const [isSavingCustomTopic, setIsSavingCustomTopic] = useState(false);
 
   // Cycle through generation steps while generating topics
   useEffect(() => {
@@ -112,6 +117,7 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
   ];
 
   const [topics, setTopics] = useState<TopicItem[]>([]);
+  const canCreateCustomTopic = profile?.role === UserRole.ADVISOR || profile?.role === UserRole.ADMIN;
 
   // Fetch topics from Supabase on mount
   useEffect(() => {
@@ -163,6 +169,62 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
       t.category.toLowerCase().includes(searchTerm.toLowerCase());
     return matchesCategory && matchesSearch;
   });
+
+  const customCategoryOptions = Array.from(new Set(topics.map(t => t.category)));
+  const effectiveCategoryOptions = customCategoryOptions.length > 0
+    ? customCategoryOptions
+    : ['Personal Finance', 'Market Updates', 'Tax Strategy', 'Estate Planning', 'Financial Planning', 'Alternative Investments', 'Lifestyle'];
+
+  const handleCreateCustomTopic = async () => {
+    const trimmedTopic = customTopic.trim();
+    if (!trimmedTopic) {
+      setCustomTopicError('Please enter a topic title.');
+      return;
+    }
+
+    setCustomTopicError(null);
+    setCustomTopicSuccess(null);
+    setIsSavingCustomTopic(true);
+    try {
+      const insertPayload: any = {
+        topic: trimmedTopic,
+        category: customCategory || 'Personal Finance',
+        source: 'manual',
+        active: true,
+      };
+
+      if (profile?.org_id && profile.org_id !== '00000000-0000-0000-0000-000000000000') {
+        insertPayload.org_id = profile.org_id;
+      }
+
+      const { data: inserted, error: insertErr } = await supabase
+        .from('topics')
+        .insert(insertPayload)
+        .select('id')
+        .single();
+
+      const topicId = inserted?.id || String(Date.now() + Math.random());
+      if (insertErr) {
+        console.warn('Failed to save custom topic to DB:', insertErr.message);
+      }
+
+      const newTopic: TopicItem = {
+        id: topicId,
+        category: customCategory || 'Personal Finance',
+        topic: trimmedTopic,
+        icon: CATEGORY_ICONS[customCategory] || DollarSign,
+      };
+
+      setTopics(prev => [newTopic, ...prev]);
+      setActiveCategory('All');
+      setCustomTopic('');
+      setCustomTopicSuccess('Topic created and added to your library.');
+    } catch (err: any) {
+      setCustomTopicError(err?.message || 'Failed to create topic. Please try again.');
+    } finally {
+      setIsSavingCustomTopic(false);
+    }
+  };
 
   // AI topic generation
   const handleGenerateTopics = async () => {
@@ -284,6 +346,47 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
         <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700 flex items-center justify-between">
           <span>{generateError}</span>
           <button onClick={() => setGenerateError(null)} className="text-red-400 hover:text-red-600 font-bold">✕</button>
+        </div>
+      )}
+
+      {/* Advisor Custom Topic Creator */}
+      {canCreateCustomTopic && (
+        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+          <div className="flex items-center gap-2 mb-3">
+            <PlusCircle size={18} className="text-primary-600" />
+            <h3 className="text-sm font-semibold text-slate-900">Create Your Own Topic</h3>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-[200px_1fr_auto] gap-3">
+            <select
+              value={customCategory}
+              onChange={(e) => setCustomCategory(e.target.value)}
+              className="px-3 py-2.5 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 text-sm"
+            >
+              {effectiveCategoryOptions.map((category) => (
+                <option key={category} value={category}>{category}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              value={customTopic}
+              onChange={(e) => setCustomTopic(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreateCustomTopic();
+              }}
+              placeholder="Enter your custom topic..."
+              className="w-full px-3 py-2.5 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 text-sm"
+            />
+            <button
+              onClick={handleCreateCustomTopic}
+              disabled={isSavingCustomTopic}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-900 text-white rounded-lg text-sm font-semibold hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+            >
+              {isSavingCustomTopic ? <Loader2 size={16} className="animate-spin" /> : <PlusCircle size={16} />}
+              Create Topic
+            </button>
+          </div>
+          {customTopicError && <p className="text-xs text-red-600 mt-2">{customTopicError}</p>}
+          {customTopicSuccess && <p className="text-xs text-emerald-600 mt-2">{customTopicSuccess}</p>}
         </div>
       )}
 
