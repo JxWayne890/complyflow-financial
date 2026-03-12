@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
+import { createRoot, Root } from 'react-dom/client';
 import { triggerContentGeneration, triggerReviewNotification, supabase } from '../services/supabaseClient';
 import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client } from '../types';
 import StatusBadge from '../components/StatusBadge';
@@ -69,6 +70,8 @@ const NO_EM_DASH_INSTRUCTION =
   'Do not use em dashes (—), en dashes (–), or HTML dash entities (&mdash; or &ndash;). Use standard hyphen (-) or other punctuation instead.';
 const REWRITE_PLAIN_TEXT_INSTRUCTION =
   'Return only the rewritten passage as plain text. Do not use Markdown syntax (such as #, *, **, _, `, lists), and do not wrap the answer in quotes or code fences.';
+const BLOG_CHART_SLOT_SELECTOR = '[data-cf-chart-slot="true"]';
+const INLINE_IMAGE_SELECTOR = 'figure[data-cf-inline-image="true"]';
 
 interface ContentEditorProps {
   userRole: UserRole;
@@ -274,7 +277,18 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         .maybeSingle();
 
       if (latestVersionError) throw latestVersionError;
-      setContent(latestVersionData || null);
+      const loadedChartData = latestVersionData?.chart_data || null;
+      setChartData(loadedChartData);
+      setContent(
+        latestVersionData
+          ? {
+            ...latestVersionData,
+            body: requestData.content_type === 'blog'
+              ? ensureBlogChartSlot(sanitizeBlogBodyForStorage(latestVersionData.body || ''), loadedChartData)
+              : latestVersionData.body,
+          }
+          : null
+      );
 
       // Fallback: if request.client_id is missing but this version was shared, derive client from share record.
       if (!requestData.client_id && latestVersionData?.id) {
@@ -350,9 +364,129 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [generationStep, setGenerationStep] = useState(0);
   const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isVideoScript = contentType === 'video_script';
+  const isBlogArticle = contentType === 'blog';
+  const inlineChartRootsRef = useRef<Map<HTMLElement, Root>>(new Map());
 
   const [extensionStep, setExtensionStep] = useState(0);
   const extensionTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const sanitizeBlogBodyForStorage = useCallback((html: string) => {
+    if (!html || html.includes('<!DOCTYPE html>')) return html;
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+
+    doc.querySelectorAll<HTMLElement>(BLOG_CHART_SLOT_SELECTOR).forEach((slot, index) => {
+      if (index > 0) {
+        slot.remove();
+        return;
+      }
+      slot.innerHTML = '';
+      slot.setAttribute('contenteditable', 'false');
+    });
+
+    return doc.body.innerHTML.trim();
+  }, []);
+
+  const ensureBlogChartSlot = useCallback((html: string, nextChartData: any | null) => {
+    if (!html || html.includes('<!DOCTYPE html>')) return html;
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const body = doc.body;
+    const existingSlots = Array.from(body.querySelectorAll<HTMLElement>(BLOG_CHART_SLOT_SELECTOR));
+
+    if (!nextChartData) {
+      existingSlots.forEach((slot) => slot.remove());
+      return body.innerHTML.trim();
+    }
+
+    let slot = existingSlots[0] || null;
+    existingSlots.slice(1).forEach((extraSlot) => extraSlot.remove());
+
+    if (!slot) {
+      slot = doc.createElement('div');
+      slot.setAttribute('data-cf-chart-slot', 'true');
+    }
+
+    slot.innerHTML = '';
+    slot.setAttribute('contenteditable', 'false');
+
+    if (!slot.parentElement) {
+      const paragraphs = Array.from(body.children).filter((child) => child.tagName === 'P');
+      if (paragraphs.length >= 3) {
+        body.insertBefore(slot, paragraphs[Math.min(2, paragraphs.length - 1)]);
+      } else if (paragraphs.length === 2) {
+        body.insertBefore(slot, paragraphs[1]);
+      } else if (paragraphs.length === 1) {
+        if (paragraphs[0].nextSibling) {
+          body.insertBefore(slot, paragraphs[0].nextSibling);
+        } else {
+          body.appendChild(slot);
+        }
+      } else if (body.children.length > 1) {
+        body.insertBefore(slot, body.children[Math.max(1, body.children.length - 1)]);
+      } else {
+        body.appendChild(slot);
+      }
+    }
+
+    return body.innerHTML.trim();
+  }, []);
+
+  const normalizeInlineImageHtml = useCallback((html: string) => {
+    if (!html) return html;
+    if (html.includes('data-cf-inline-image="true"')) return html;
+    return html.replace(/<figure\b/i, '<figure data-cf-inline-image="true"');
+  }, []);
+
+  const insertInlineImageIntoBlogBody = useCallback((html: string, imageHtml: string, nextChartData: any | null) => {
+    if (!html || html.includes('<!DOCTYPE html>')) return normalizeInlineImageHtml(imageHtml);
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(ensureBlogChartSlot(html, nextChartData), 'text/html');
+    const body = doc.body;
+    const normalizedImageHtml = normalizeInlineImageHtml(imageHtml);
+    const imageDoc = parser.parseFromString(normalizedImageHtml, 'text/html');
+    const imageElement = imageDoc.body.firstElementChild;
+
+    if (!imageElement) {
+      return ensureBlogChartSlot(html, nextChartData);
+    }
+
+    const existingInlineImage = body.querySelector(INLINE_IMAGE_SELECTOR);
+    if (existingInlineImage) {
+      existingInlineImage.replaceWith(imageElement);
+      return sanitizeBlogBodyForStorage(body.innerHTML);
+    }
+
+    const topLevelFigure = Array.from(body.children).find((child) => child.tagName === 'FIGURE');
+    if (topLevelFigure && (topLevelFigure === body.firstElementChild || topLevelFigure === body.lastElementChild)) {
+      topLevelFigure.replaceWith(imageElement);
+      return sanitizeBlogBodyForStorage(body.innerHTML);
+    }
+
+    const paragraphs = Array.from(body.children).filter((child) => child.tagName === 'P');
+    const chartSlot = body.querySelector(BLOG_CHART_SLOT_SELECTOR);
+
+    if (paragraphs.length >= 2) {
+      body.insertBefore(imageElement, paragraphs[1]);
+    } else if (paragraphs.length === 1) {
+      if (chartSlot) {
+        body.insertBefore(imageElement, chartSlot);
+      } else if (paragraphs[0].nextSibling) {
+        body.insertBefore(imageElement, paragraphs[0].nextSibling);
+      } else {
+        body.appendChild(imageElement);
+      }
+    } else if (chartSlot) {
+      body.insertBefore(imageElement, chartSlot);
+    } else {
+      body.appendChild(imageElement);
+    }
+
+    return sanitizeBlogBodyForStorage(body.innerHTML);
+  }, [ensureBlogChartSlot, normalizeInlineImageHtml, sanitizeBlogBodyForStorage]);
 
   // Cycle through generation steps while generating
   useEffect(() => {
@@ -502,7 +636,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     };
 
     const sanitizedTitle = sanitizeNoEmDashes(payload.title);
-    const sanitizedBody = sanitizeNoEmDashes(payload.body);
+    const sanitizedBody = sanitizeNoEmDashes(sanitizeBlogBodyForStorage(payload.body));
     const sanitizedDisclaimers = sanitizeNoEmDashes(payload.disclaimers);
 
     const nextVersion = (content?.version_number || 0) + 1;
@@ -515,7 +649,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         title: sanitizedTitle,
         body: sanitizedBody,
         disclaimers: sanitizedDisclaimers || null,
-        chart_data: payload.chart_data || null,
+        chart_data: payload.chart_data ?? null,
       })
       .select('*')
       .single();
@@ -538,9 +672,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const saveCurrentEditorVersion = async (targetRequestId: string) => {
     if (!content) return null;
     const latestBodyRaw = editorRef.current?.innerHTML || content.body || '';
-    const latestBody = latestBodyRaw.replace(/class="new-content-highlight"/g, '').trim();
+    const latestBody = sanitizeBlogBodyForStorage(
+      latestBodyRaw.replace(/class="new-content-highlight"/g, '').trim()
+    );
     const latestTitle = (content.title || '').trim();
-    const existingBody = (content.body || '').replace(/class="new-content-highlight"/g, '').trim();
+    const existingBody = sanitizeBlogBodyForStorage(
+      (content.body || '').replace(/class="new-content-highlight"/g, '').trim()
+    );
     const existingTitle = (content.title || '').trim();
 
     if (latestBody === existingBody && latestTitle === existingTitle) {
@@ -552,6 +690,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       title: latestTitle,
       body: latestBody,
       disclaimers: content.disclaimers,
+      chart_data: chartData,
     });
 
     setContent(savedVersion);
@@ -678,6 +817,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const currentRequestId = await ensureRequestId();
 
       if (generationMode === 'image') {
+        setChartData(null);
         // IMAGE-ONLY mode: use the image provider directly
         const imageResponse: any = await triggerContentGeneration({
           topic,
@@ -693,6 +833,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           title: `Visual Asset: ${topic}`,
           body: '',
           disclaimers: imageResponse.data?.disclaimers || '',
+          chart_data: null,
         });
         setContent(placeholderVersion);
 
@@ -707,6 +848,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             title: `Visual Asset: ${topic}`,
             body: imgHtml,
             disclaimers: imageResponse.data.disclaimers || '',
+            chart_data: null,
           });
           setContent(savedVersion);
         }
@@ -774,24 +916,26 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           setShowTextSelection(true);
 
           const firstOption = processedOptions[0];
-          if (firstOption.chartData) setChartData(firstOption.chartData);
+          setChartData(firstOption.chartData ?? null);
 
           savedVersion = await createContentVersion(currentRequestId, {
             generated_by: 'ai',
             title: firstOption.title,
-            body: firstOption.body,
+            body: isBlogArticle ? ensureBlogChartSlot(firstOption.body, firstOption.chartData) : firstOption.body,
             disclaimers: firstOption.disclaimers,
+            chart_data: firstOption.chartData ?? null,
           });
           setContent(savedVersion);
         } else if (generateResponse.data) {
           const { body: cleanedBody, chartData: parsedChartData } = extractChartData(generateResponse.data.body);
-          if (parsedChartData) setChartData(parsedChartData);
+          setChartData(parsedChartData ?? null);
 
           savedVersion = await createContentVersion(currentRequestId, {
             generated_by: 'ai',
             title: generateResponse.data.title,
-            body: cleanedBody,
+            body: isBlogArticle ? ensureBlogChartSlot(cleanedBody, parsedChartData) : cleanedBody,
             disclaimers: generateResponse.data.disclaimers,
+            chart_data: parsedChartData ?? null,
           });
           setContent(savedVersion);
         }
@@ -813,12 +957,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               setShowImageSelection(true);
             } else if (imageResponse.data) {
               const imgHtml = imageResponse.data.body;
-              const newBody = `${imgHtml}<br/><hr/><br/>${savedVersion.body}`;
+              const newBody = isBlogArticle
+                ? insertInlineImageIntoBlogBody(savedVersion.body, imgHtml, chartData || (savedVersion as any).chart_data || null)
+                : `${imgHtml}<br/><hr/><br/>${savedVersion.body}`;
               const updatedVersion = await createContentVersion(currentRequestId, {
                 generated_by: 'ai',
                 title: savedVersion.title,
                 body: newBody,
                 disclaimers: savedVersion.disclaimers,
+                chart_data: chartData || (savedVersion as any).chart_data || null,
               });
               setContent(updatedVersion);
             }
@@ -841,13 +988,14 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const selectTextOption = async (option: any) => {
     if (!requestId) return;
     try {
-      if (option.chartData) setChartData(option.chartData);
+      setChartData(option.chartData ?? null);
 
       const savedVersion = await createContentVersion(requestId, {
         generated_by: 'ai',
         title: option.title,
-        body: option.body,
+        body: isBlogArticle ? ensureBlogChartSlot(option.body, option.chartData ?? null) : option.body,
         disclaimers: option.disclaimers,
+        chart_data: option.chartData ?? null,
       });
       setContent(savedVersion);
       setShowTextSelection(false);
@@ -896,6 +1044,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     setSavingImageIndex(index ?? null);
 
     try {
+      const effectiveChartData = chartData ?? (content as any).chart_data ?? null;
       let newBody = content.body;
       if (!newBody || newBody.trim() === '') {
         // Image-only mode: just use the image HTML
@@ -909,8 +1058,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const savedVersion = await createContentVersion(requestId, {
         generated_by: 'ai',
         title: content.title,
-        body: newBody,
+        body: isBlogArticle ? insertInlineImageIntoBlogBody(content.body, selectedImage.html, effectiveChartData) : newBody,
         disclaimers: content.disclaimers,
+        chart_data: effectiveChartData,
       });
 
       setContent(savedVersion);
@@ -984,8 +1134,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         const savedVersion = await createContentVersion(requestId, {
           generated_by: 'ai',
           title: content.title,
-          body: response.data.body || content.body,
+          body: isBlogArticle ? ensureBlogChartSlot(response.data.body || content.body, chartData) : (response.data.body || content.body),
           disclaimers: content.disclaimers,
+          chart_data: chartData,
         });
 
         const highlightedBody = handleHighlightAnimation(previousBody, savedVersion.body);
@@ -1909,10 +2060,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       if (!currentRequestId || !currentContent) return null;
 
       const cleanedHtml = isContentEditableRuntime
-        ? ((editableRoot?.innerHTML || '').trim())
+        ? sanitizeBlogBodyForStorage((editableRoot?.innerHTML || '').trim())
         : stripIframeEditorInjection(`<!DOCTYPE html>\n${frameDocument.documentElement.outerHTML}`);
       const currentBody = isContentEditableRuntime
-        ? ((currentContent.body || '').trim())
+        ? sanitizeBlogBodyForStorage((currentContent.body || '').trim())
         : stripIframeEditorInjection(currentContent.body || '');
       if (!cleanedHtml || cleanedHtml === currentBody) return currentContent;
 
@@ -1921,6 +2072,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         title: currentContent.title,
         body: cleanedHtml,
         disclaimers: currentContent.disclaimers,
+        chart_data: chartData,
       });
 
       const scrollingElement = frameDocument.scrollingElement || frameDocument.documentElement || frameDocument.body;
@@ -2753,6 +2905,163 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   };
 
+  const renderChartCard = useCallback((data: any, inline = false) => {
+    if (!data) return null;
+
+    return (
+      <div
+        className={inline ? 'not-prose my-10' : 'shrink-0 mt-12 pt-8 border-t border-slate-100'}
+        contentEditable={false}
+        suppressContentEditableWarning
+      >
+        <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
+          <h3 style={{ fontFamily: "'Georgia', serif", fontSize: '1.35rem', fontWeight: 700, color: '#0f172a', margin: '0 0 6px 0' }}>
+            {data.title || 'Data Overview'}
+          </h3>
+
+          {data.subtitle && (
+            <p style={{ fontSize: '0.85rem', color: '#64748b', margin: '0 0 24px 0', lineHeight: 1.5 }}>
+              {data.subtitle}
+            </p>
+          )}
+
+          <div className="w-full" style={{ height: data.type === 'horizontalBar' ? `${Math.max(300, (data.data?.length || 5) * 55)}px` : '360px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              {data.type === 'stackedBar' ? (
+                <BarChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  {(data.stackKeys || ['value', 'value2', 'value3']).map((key: string, i: number) => (
+                    <Bar key={key} dataKey={key} stackId="a" fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][i % 6]} name={data.stackLabels?.[i] || key} />
+                  ))}
+                </BarChart>
+              ) : data.type === 'horizontalBar' ? (
+                <BarChart data={data.data} layout="vertical" margin={{ top: 10, right: 30, bottom: 10, left: 20 }}>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
+                  <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
+                  <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#334155' }} width={160} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                  <Bar dataKey="value" radius={[0, 4, 4, 0]} name={data.dataLabel || 'Value'}>
+                    {data.data.map((_entry: any, index: number) => (
+                      <Cell key={`cell-${index}`} fill={['#1a365f', '#1f2758', '#7a2828', '#b3822f', '#4c6b36', '#1f5c7a', '#83a762'][index % 7]} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              ) : data.type === 'areaLine' ? (
+                <AreaChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  <defs>
+                    <linearGradient id={inline ? 'areaFillInline1' : 'areaFill1'} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#7a2828" stopOpacity={0.15} />
+                      <stop offset="95%" stopColor="#7a2828" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <Area type="monotone" dataKey="value" stroke="#7a2828" strokeWidth={2.5} fill={`url(#${inline ? 'areaFillInline1' : 'areaFill1'})`} dot={{ r: 4, fill: '#7a2828', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel || 'Value'} />
+                  {data.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel2 || 'Value 2'} />}
+                  {data.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel3 || 'Value 3'} />}
+                </AreaChart>
+              ) : data.type === 'multiLine' ? (
+                <AreaChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  <defs>
+                    <linearGradient id={inline ? 'mlFillInline1' : 'mlFill1'} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#1a365f" stopOpacity={0.12} /><stop offset="95%" stopColor="#1a365f" stopOpacity={0.01} /></linearGradient>
+                    <linearGradient id={inline ? 'mlFillInline2' : 'mlFill2'} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#b3822f" stopOpacity={0.12} /><stop offset="95%" stopColor="#b3822f" stopOpacity={0.01} /></linearGradient>
+                    <linearGradient id={inline ? 'mlFillInline3' : 'mlFill3'} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4c6b36" stopOpacity={0.12} /><stop offset="95%" stopColor="#4c6b36" stopOpacity={0.01} /></linearGradient>
+                  </defs>
+                  <Area type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} fill={`url(#${inline ? 'mlFillInline1' : 'mlFill1'})`} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel || 'Series 1'} />
+                  {data.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill={`url(#${inline ? 'mlFillInline2' : 'mlFill2'})`} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel2 || 'Series 2'} />}
+                  {data.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill={`url(#${inline ? 'mlFillInline3' : 'mlFill3'})`} dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel3 || 'Series 3'} />}
+                </AreaChart>
+              ) : data.type === 'line' ? (
+                <LineChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  <Line type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel || 'Value'} />
+                  {data.dataKey2 && <Line type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel2 || 'Value 2'} />}
+                </LineChart>
+              ) : data.type === 'pie' ? (
+                <PieChart>
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                  <Legend wrapperStyle={{ fontSize: '13px' }} />
+                  <Pie data={data.data} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={3} dataKey="value">
+                    {data.data.map((_entry: any, index: number) => (
+                      <Cell key={`cell-${index}`} fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][index % 6]} />
+                    ))}
+                  </Pie>
+                </PieChart>
+              ) : (
+                <BarChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={data.yAxisPercent ? ((v: number) => `${v}%`) : undefined} />
+                  <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={data.yAxisPercent ? ((value: number) => `${value}%`) : undefined} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  <Bar dataKey="value" fill="#1a365f" radius={[4, 4, 0, 0]} name={data.dataLabel || 'Value'} />
+                  {data.dataKey2 && <Bar dataKey="value2" fill="#b3822f" radius={[4, 4, 0, 0]} name={data.dataLabel2 || 'Value 2'} />}
+                </BarChart>
+              )}
+            </ResponsiveContainer>
+          </div>
+
+          {data.source && (
+            <p style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic', marginTop: '16px', lineHeight: 1.5 }}>
+              {data.source}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }, []);
+
+  useEffect(() => {
+    const roots = inlineChartRootsRef.current;
+
+    if (!editorRef.current || !chartData || content?.body?.includes('<!DOCTYPE html>')) {
+      roots.forEach((root) => root.unmount());
+      roots.clear();
+      return;
+    }
+
+    const slotNodes = Array.from(editorRef.current.querySelectorAll<HTMLElement>(BLOG_CHART_SLOT_SELECTOR));
+    roots.forEach((root, node) => {
+      if (!slotNodes.includes(node)) {
+        root.unmount();
+        roots.delete(node);
+      }
+    });
+
+    slotNodes.forEach((node) => {
+      node.setAttribute('contenteditable', 'false');
+      let root = roots.get(node);
+      if (!root) {
+        root = createRoot(node);
+        roots.set(node, root);
+      }
+      root.render(renderChartCard(chartData, true));
+    });
+  }, [chartData, content?.body, renderChartCard]);
+
+  useEffect(() => {
+    return () => {
+      inlineChartRootsRef.current.forEach((root) => root.unmount());
+      inlineChartRootsRef.current.clear();
+    };
+  }, []);
+
   const textProviderLabel = textProvider === 'kimi' ? 'Kimi K2.5 (NVIDIA NIM)' : 'Claude';
   const imageProviderLabel = imageProvider === 'chatgpt' ? 'ChatGPT Image' : 'Gemini Image (Nano Banana)';
   const imageProviderShortLabel = imageProvider === 'chatgpt' ? 'ChatGPT' : 'Gemini';
@@ -3583,7 +3892,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     if (nextFocused?.closest('#cfIframePill')) {
                       return;
                     }
-                    const nextBody = e.currentTarget.innerHTML;
+                    const nextBody = sanitizeBlogBodyForStorage(e.currentTarget.innerHTML);
                     if (nextBody === content.body) {
                       return;
                     }
@@ -3610,7 +3919,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                             <Sparkles size={18} />
                           </div>
                           <div className="text-left">
-                            <p className="text-sm font-bold">Generate Header Image</p>
+                            <p className="text-sm font-bold">Generate Inline Image</p>
                             <p className="text-[10px] text-primary-500 font-medium">Powered by {imageProviderLabel}</p>
                           </div>
                         </>
@@ -3630,135 +3939,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   </div>
                 )}
 
-                {/* Data Visualizations Section */}
-                {chartData && (
-                  <div className="shrink-0 mt-12 pt-8 border-t border-slate-100">
-                    <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
-                      {/* Chart Title */}
-                      <h3 style={{ fontFamily: "'Georgia', serif", fontSize: '1.35rem', fontWeight: 700, color: '#0f172a', margin: '0 0 6px 0' }}>
-                        {chartData.title || 'Data Overview'}
-                      </h3>
-                      {/* Chart Subtitle */}
-                      {chartData.subtitle && (
-                        <p style={{ fontSize: '0.85rem', color: '#64748b', margin: '0 0 24px 0', lineHeight: 1.5 }}>
-                          {chartData.subtitle}
-                        </p>
-                      )}
-
-                      <div className="w-full" style={{ height: chartData.type === 'horizontalBar' ? `${Math.max(300, (chartData.data?.length || 5) * 55)}px` : '360px' }}>
-                        <ResponsiveContainer width="100%" height="100%">
-                          {/* STACKED BAR CHART */}
-                          {chartData.type === 'stackedBar' ? (
-                            <BarChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                              {(chartData.stackKeys || ['value', 'value2', 'value3']).map((key: string, i: number) => (
-                                <Bar key={key} dataKey={key} stackId="a" fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][i % 6]} name={chartData.stackLabels?.[i] || key} />
-                              ))}
-                            </BarChart>
-
-                          /* HORIZONTAL BAR CHART */
-                          ) : chartData.type === 'horizontalBar' ? (
-                            <BarChart data={chartData.data} layout="vertical" margin={{ top: 10, right: 30, bottom: 10, left: 20 }}>
-                              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
-                              <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
-                              <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#334155' }} width={160} />
-                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                              <Bar dataKey="value" radius={[0, 4, 4, 0]} name={chartData.dataLabel || 'Value'}>
-                                {chartData.data.map((_entry: any, index: number) => (
-                                  <Cell key={`cell-${index}`} fill={['#1a365f', '#1f2758', '#7a2828', '#b3822f', '#4c6b36', '#1f5c7a', '#83a762'][index % 7]} />
-                                ))}
-                              </Bar>
-                            </BarChart>
-
-                          /* AREA LINE CHART (line with shaded area fill) */
-                          ) : chartData.type === 'areaLine' ? (
-                            <AreaChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                              <defs>
-                                <linearGradient id="areaFill1" x1="0" y1="0" x2="0" y2="1">
-                                  <stop offset="5%" stopColor="#7a2828" stopOpacity={0.15} />
-                                  <stop offset="95%" stopColor="#7a2828" stopOpacity={0.02} />
-                                </linearGradient>
-                              </defs>
-                              <Area type="monotone" dataKey="value" stroke="#7a2828" strokeWidth={2.5} fill="url(#areaFill1)" dot={{ r: 4, fill: '#7a2828', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={chartData.dataLabel || 'Value'} />
-                              {chartData.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel2 || 'Value 2'} />}
-                              {chartData.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel3 || 'Value 3'} />}
-                            </AreaChart>
-
-                          /* MULTI-LINE CHART with area fills */
-                          ) : chartData.type === 'multiLine' ? (
-                            <AreaChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                              <defs>
-                                <linearGradient id="mlFill1" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#1a365f" stopOpacity={0.12}/><stop offset="95%" stopColor="#1a365f" stopOpacity={0.01}/></linearGradient>
-                                <linearGradient id="mlFill2" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#b3822f" stopOpacity={0.12}/><stop offset="95%" stopColor="#b3822f" stopOpacity={0.01}/></linearGradient>
-                                <linearGradient id="mlFill3" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4c6b36" stopOpacity={0.12}/><stop offset="95%" stopColor="#4c6b36" stopOpacity={0.01}/></linearGradient>
-                              </defs>
-                              <Area type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} fill="url(#mlFill1)" dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel || 'Series 1'} />
-                              {chartData.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill="url(#mlFill2)" dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel2 || 'Series 2'} />}
-                              {chartData.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill="url(#mlFill3)" dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={chartData.dataLabel3 || 'Series 3'} />}
-                            </AreaChart>
-
-                          /* STANDARD LINE CHART */
-                          ) : chartData.type === 'line' ? (
-                            <LineChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
-                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                              <Line type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={chartData.dataLabel || 'Value'} />
-                              {chartData.dataKey2 && <Line type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={chartData.dataLabel2 || 'Value 2'} />}
-                            </LineChart>
-
-                          /* PIE CHART */
-                          ) : chartData.type === 'pie' ? (
-                            <PieChart>
-                              <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                              <Legend wrapperStyle={{ fontSize: '13px' }} />
-                              <Pie data={chartData.data} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={3} dataKey="value">
-                                {chartData.data.map((_entry: any, index: number) => (
-                                  <Cell key={`cell-${index}`} fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][index % 6]} />
-                                ))}
-                              </Pie>
-                            </PieChart>
-
-                          /* DEFAULT: GROUPED BAR CHART */
-                          ) : (
-                            <BarChart data={chartData.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={chartData.yAxisPercent ? ((v: number) => `${v}%`) : undefined} />
-                              <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={chartData.yAxisPercent ? ((value: number) => `${value}%`) : undefined} />
-                              <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                              <Bar dataKey="value" fill="#1a365f" radius={[4, 4, 0, 0]} name={chartData.dataLabel || 'Value'} />
-                              {chartData.dataKey2 && <Bar dataKey="value2" fill="#b3822f" radius={[4, 4, 0, 0]} name={chartData.dataLabel2 || 'Value 2'} />}
-                            </BarChart>
-                          )}
-                        </ResponsiveContainer>
-                      </div>
-
-                      {/* Source Citation */}
-                      {chartData.source && (
-                        <p style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic', marginTop: '16px', lineHeight: 1.5 }}>
-                          {chartData.source}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                )}
+                {chartData && !content.body.includes('data-cf-chart-slot="true"') && renderChartCard(chartData)}
               </div>
 
               {/* Live Extension Progress Overlay */}

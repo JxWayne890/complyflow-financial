@@ -60,6 +60,7 @@ Rules:
 - Use ## for each section heading.
 - Use **bold** for emphasis within paragraphs.
 - Write in a flowing, human narrative. No AI-isms (avoid "In conclusion", "Delve", "Tapestry").
+- Structure the article so it reads naturally with an opening section, then an interior visual, then more body copy, then a mid-article chart, then closing body text.
 - DO NOT use bullet points with dashes/hyphens in the article body.
 - DO NOT include disclaimers, stats blocks, or legal text.
 - DO NOT include category labels, read time, or any metadata.
