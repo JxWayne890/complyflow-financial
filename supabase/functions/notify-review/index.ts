@@ -6,8 +6,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const RESEND_API_KEY = 're_ey7CnNpe_qR5kz8e4JZFL7shQd3zR1zhZ';
-
 serve(async (req) => {
   // Handle CORS preflight request
   if (req.method === 'OPTIONS') {
@@ -25,8 +23,17 @@ serve(async (req) => {
     }
 
     // Initialize Supabase client
-    const supabaseUrl = Deno.env.get('MY_SUPABASE_URL') ?? '';
-    const supabaseServiceKey = Deno.env.get('MY_SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    const resendApiKey = Deno.env.get('RESEND_API_KEY') ?? '';
+
+    if (!supabaseUrl || !supabaseServiceKey) {
+      throw new Error('Missing Supabase function environment variables.');
+    }
+
+    if (!resendApiKey) {
+      throw new Error('Missing RESEND_API_KEY secret.');
+    }
     
     // We need service role to query profiles (other users)
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
@@ -45,6 +52,7 @@ serve(async (req) => {
 
     if (!orgData?.enable_review_emails) {
       return new Response(JSON.stringify({ message: 'Review emails disabled for this org.' }), {
+        status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
@@ -77,7 +85,8 @@ serve(async (req) => {
     if (compError) throw compError;
 
     if (!complianceUsers || complianceUsers.length === 0) {
-      return new Response(JSON.stringify({ message: 'No compliance users found in this org.' }), {
+      return new Response(JSON.stringify({ error: 'No compliance users found in this org.' }), {
+        status: 409,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
@@ -85,7 +94,8 @@ serve(async (req) => {
     const recipientEmails = complianceUsers.map(u => u.email).filter(Boolean);
 
     if (recipientEmails.length === 0) {
-      return new Response(JSON.stringify({ message: 'Compliance users have no valid emails.' }), {
+      return new Response(JSON.stringify({ error: 'Compliance users have no valid emails.' }), {
+        status: 409,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
@@ -95,7 +105,7 @@ serve(async (req) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${RESEND_API_KEY}`,
+        Authorization: `Bearer ${resendApiKey}`,
       },
       body: JSON.stringify({
         from: 'Comply Flow <onboarding@resend.dev>',

@@ -167,6 +167,16 @@ $$;
 CREATE POLICY "View own org" ON organizations FOR SELECT
 USING (id = get_auth_org_id());
 
+CREATE POLICY "Compliance/Admin update own org" ON organizations FOR UPDATE
+USING (
+  id = get_auth_org_id()
+  AND get_auth_role() IN ('compliance', 'admin')
+)
+WITH CHECK (
+  id = get_auth_org_id()
+  AND get_auth_role() IN ('compliance', 'admin')
+);
+
 -- Profiles: View profiles in same org
 CREATE POLICY "View org profiles" ON profiles FOR SELECT
 USING (org_id = get_auth_org_id());

@@ -12,7 +12,7 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-const extractFunctionErrorMessage = async (error: any): Promise<string> => {
+export const extractFunctionErrorMessage = async (error: any): Promise<string> => {
   if (!error) return 'Unknown function error';
 
   const response = error?.context;
@@ -85,6 +85,27 @@ export const triggerTopicGeneration = async (
   }
 
   if (data && data.error) {
+    throw new Error(data.error);
+  }
+
+  return data;
+};
+
+export const triggerReviewNotification = async (payload: {
+  request_id: string;
+  org_id: string;
+}) => {
+  const { data, error } = await supabase.functions.invoke('notify-review', {
+    body: payload,
+  });
+
+  if (error) {
+    console.error('Error invoking review notification:', error);
+    const message = await extractFunctionErrorMessage(error);
+    throw new Error(message);
+  }
+
+  if (data?.error) {
     throw new Error(data.error);
   }
 

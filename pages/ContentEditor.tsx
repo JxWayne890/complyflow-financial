@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
-import { triggerContentGeneration, supabase } from '../services/supabaseClient';
+import { triggerContentGeneration, triggerReviewNotification, supabase } from '../services/supabaseClient';
 import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
@@ -1095,11 +1095,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       if (requestUpdateError) throw requestUpdateError;
 
-      // Notify compliance team asynchronously
+      // Block on the notification call so failures are visible to the user.
       if (profile?.org_id) {
-        supabase.functions.invoke('notify-review', {
-          body: { request_id: currentRequestId, org_id: profile.org_id }
-        }).catch(err => console.error('Error notifying compliance:', err));
+        await triggerReviewNotification({
+          request_id: currentRequestId,
+          org_id: profile.org_id,
+        });
       }
 
       setShowComplianceModal(false);
