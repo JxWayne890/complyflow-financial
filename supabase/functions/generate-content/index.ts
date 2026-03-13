@@ -237,17 +237,32 @@ const TOPIC_STOP_WORDS = new Set([
   "how", "what", "when", "where", "why", "who", "impact", "impacts", "affect", "affects",
   "effect", "effects", "economy", "economic", "global", "market", "markets", "price", "prices",
   "analysis", "understanding", "guide", "overview", "update", "latest",
+  "war", "wars", "oil", "crude", "energy", "gas", "gasoline", "conflict", "conflicts",
+  "news", "current", "events",
 ]);
 
 const extractNamedTopicAnchors = (topic: string) => {
   const matches = topic.match(/\b[A-Z][a-z]+\b/g) || [];
-  return Array.from(
+  const fromCapitalized = Array.from(
     new Set(
       matches
         .map((value) => value.toLowerCase())
         .filter((value) => value.length >= 3 && !TOPIC_STOP_WORDS.has(value)),
     ),
-  ).slice(0, 4);
+  );
+
+  if (fromCapitalized.length > 0) {
+    return fromCapitalized.slice(0, 4);
+  }
+
+  // Fallback for lowercase input topics (e.g., "iran war oil prices impact economy")
+  return Array.from(
+    new Set(
+      normalizeText(topic)
+        .split(" ")
+        .filter((value) => value.length >= 4 && !TOPIC_STOP_WORDS.has(value)),
+    ),
+  ).slice(0, 3);
 };
 
 const extractGeneralTopicAnchors = (topic: string) => {
@@ -276,6 +291,19 @@ const TRUSTED_NEWS_HOSTS = [
   "apnews.com",
 ];
 
+const GROUNDED_NEWS_HOSTS = [
+  ...TRUSTED_NEWS_HOSTS,
+  "nytimes.com",
+  "washingtonpost.com",
+  "bloomberg.com",
+  "wsj.com",
+  "ft.com",
+  "theguardian.com",
+  "pbs.org",
+  "cnbc.com",
+  "marketwatch.com",
+];
+
 const hostInList = (host: string, list: string[]) =>
   list.some((item) => host === item || host.endsWith(`.${item}`));
 
@@ -297,7 +325,7 @@ const officialDomainBoost = (url?: string | null) => {
       return 2.5;
     }
     if (hostInList(host, PRIMARY_NON_GOV_HOSTS)) return 1.8;
-    if (hostInList(host, TRUSTED_NEWS_HOSTS)) return 1.0;
+    if (hostInList(host, TRUSTED_NEWS_HOSTS)) return 1.4;
     if (host.endsWith(".edu")) return 1.2;
     return 0;
   } catch {
@@ -311,7 +339,7 @@ const sourceTypeBoost = (sourceType: string) => {
     return 2;
   }
   if (["grounded_search", "news_wire"].includes(value)) {
-    return 0.8;
+    return 1.4;
   }
   if (["pdf", "document", "uploaded_document", "stored_chunk"].includes(value)) {
     return 1;
@@ -345,6 +373,9 @@ const isAllowedOfficialHost = (hostname: string) => {
 
 const isTrustedNewsHost = (hostname: string) =>
   hostInList((hostname || "").toLowerCase(), TRUSTED_NEWS_HOSTS);
+
+const isGroundedNewsHost = (hostname: string) =>
+  hostInList((hostname || "").toLowerCase(), GROUNDED_NEWS_HOSTS);
 
 const getWebChunkSourceType = (hostname: string) =>
   isTrustedNewsHost(hostname) ? "grounded_search" : "official_web";
@@ -493,6 +524,38 @@ const dedupeChunks = (chunks: RetrievedChunk[]) => {
   return deduped;
 };
 
+const selectTopChunksWithSourceDiversity = (
+  chunks: RetrievedChunk[],
+  maxTotal: number,
+  maxPerSource: number,
+  maxPerHost: number,
+) => {
+  const selected: RetrievedChunk[] = [];
+  const perSourceCount = new Map<string, number>();
+  const perHostCount = new Map<string, number>();
+
+  for (const chunk of chunks) {
+    const current = perSourceCount.get(chunk.source_id) || 0;
+    if (current >= maxPerSource) continue;
+
+    let hostKey = "unknown";
+    try {
+      hostKey = new URL(chunk.canonical_url || "").hostname.toLowerCase() || "unknown";
+    } catch {
+      hostKey = "unknown";
+    }
+    const hostCurrent = perHostCount.get(hostKey) || 0;
+    if (hostCurrent >= maxPerHost) continue;
+
+    selected.push(chunk);
+    perSourceCount.set(chunk.source_id, current + 1);
+    perHostCount.set(hostKey, hostCurrent + 1);
+    if (selected.length >= maxTotal) break;
+  }
+
+  return selected;
+};
+
 const makeSourceIdFromUrl = (url: string, index: number) => {
   const encoded = btoa(url).replace(/[^a-zA-Z0-9]/g, "").slice(0, 18);
   return `${SOURCE_MARKER_PREFIX}web_${index}_${encoded || "source"}`;
@@ -558,10 +621,14 @@ const getFallbackOfficialUrlsForTopic = (params: {
     urls.add("https://www.eia.gov/petroleum/");
     urls.add("https://www.eia.gov/outlooks/steo/");
     urls.add("https://www.eia.gov/todayinenergy/");
+    urls.add("https://www.eia.gov/todayinenergy/index.php");
     urls.add("https://www.iea.org/topics/oil-market-report");
     urls.add("https://www.opec.org/opec_web/en/press_room/");
     urls.add("https://www.reuters.com/world/middle-east/");
     urls.add("https://apnews.com/hub/middle-east");
+    urls.add("https://apnews.com/hub/iran");
+    urls.add("https://apnews.com/search?q=iran%20oil%20prices%20economy");
+    urls.add("https://apnews.com/search?q=iran%20war%20oil");
   }
 
   return Array.from(urls).slice(0, 10);
@@ -573,68 +640,59 @@ const buildOfficialSearchDomainsForTopic = (params: {
   currentContent: string;
 }) => {
   const context = normalizeText(`${params.topic} ${params.instructions || ""} ${(params.currentContent || "").slice(0, 1500)}`);
-  const domains = new Set<string>();
+  const domains: string[] = [];
+  const seen = new Set<string>();
+  const addDomain = (value: string) => {
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    domains.push(value);
+  };
+  const addDomains = (values: string[]) => values.forEach(addDomain);
   const isRetirementTaxTopic = /\b(ira|roth|backdoor|retirement account|retirement arrangement|tax|taxes|contribution|deduction)\b/.test(context);
   const isSecuritiesTopic = /\b(security|securities|etf|mutual fund|prospectus|filing|10-k|10q|10-q)\b/.test(context);
   const isGeoEnergyTopic = /\b(oil|crude|brent|wti|energy|gasoline|opec|middle east|iran|war|geopolitic|strait of hormuz|supply shock)\b/.test(context);
   const isGlobalMacroTopic = /\b(global|international|cross-border|geopolitic|trade|macro|recession|growth)\b/.test(context);
+  const defaultMacroDomains = ["federalreserve.gov", "treasury.gov", "bls.gov", "bea.gov"];
 
-  // Default macro/public data domains
-  domains.add("federalreserve.gov");
-  domains.add("treasury.gov");
-  domains.add("bls.gov");
-  domains.add("bea.gov");
+  if (isGeoEnergyTopic) {
+    addDomains(["reuters.com", "apnews.com", "eia.gov", "iea.org", "opec.org", "imf.org", "worldbank.org"]);
+  }
+
+  addDomains(defaultMacroDomains);
 
   if (isRetirementTaxTopic) {
-    domains.add("irs.gov");
-    domains.add("investor.gov");
-    domains.add("finra.org");
-    domains.add("reuters.com");
-    domains.add("apnews.com");
+    addDomains(["irs.gov", "investor.gov", "finra.org", "reuters.com", "apnews.com"]);
   }
 
   if (isSecuritiesTopic) {
-    domains.add("sec.gov");
-    domains.add("investor.gov");
-    domains.add("finra.org");
+    addDomains(["sec.gov", "investor.gov", "finra.org"]);
   }
 
   if (/\b(inflation|cpi|employment|labor|wage|unemployment)\b/.test(context)) {
-    domains.add("bls.gov");
+    addDomain("bls.gov");
   }
 
   if (/\b(gdp|personal consumption|national accounts)\b/.test(context)) {
-    domains.add("bea.gov");
+    addDomain("bea.gov");
   }
 
   if (/\b(interest rate|federal funds|fomc|monetary policy)\b/.test(context)) {
-    domains.add("federalreserve.gov");
+    addDomain("federalreserve.gov");
   }
 
   if (isGlobalMacroTopic) {
-    domains.add("imf.org");
-    domains.add("worldbank.org");
-    domains.add("oecd.org");
-    domains.add("reuters.com");
-    domains.add("apnews.com");
+    addDomains(["imf.org", "worldbank.org", "oecd.org", "reuters.com", "apnews.com"]);
   }
 
   if (isGeoEnergyTopic) {
-    domains.add("eia.gov");
-    domains.add("iea.org");
-    domains.add("opec.org");
-    domains.add("imf.org");
-    domains.add("worldbank.org");
-    domains.add("reuters.com");
-    domains.add("apnews.com");
+    addDomains(["eia.gov", "iea.org", "opec.org", "imf.org", "worldbank.org", "reuters.com", "apnews.com"]);
   }
 
   if (!isRetirementTaxTopic && !isSecuritiesTopic && !isGeoEnergyTopic) {
-    domains.add("reuters.com");
-    domains.add("apnews.com");
+    addDomains(["reuters.com", "apnews.com"]);
   }
 
-  return Array.from(domains).slice(0, 20);
+  return domains.slice(0, 20);
 };
 
 const extractDuckDuckGoResultUrls = (html: string) => {
@@ -668,35 +726,147 @@ const extractDuckDuckGoResultUrls = (html: string) => {
   return Array.from(new Set(urls));
 };
 
+const extractApArticleUrlsFromSearchHtml = (html: string, preferredTerms: string[]) => {
+  const matches = html.matchAll(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi);
+  const ranked: Array<{ url: string; score: number }> = [];
+  const seen = new Set<string>();
+
+  for (const match of matches) {
+    const href = decodeHtmlEntities((match[1] || "").trim());
+    if (!href) continue;
+
+    let absolute = "";
+    try {
+      absolute = normalizeCanonicalUrl(new URL(href, "https://apnews.com").toString());
+    } catch {
+      continue;
+    }
+
+    if (!isAllowedOfficialUrl(absolute)) continue;
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(absolute);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) continue;
+
+    if (!hostInList(parsed.hostname.toLowerCase(), TRUSTED_NEWS_HOSTS)) continue;
+    if (!/\/article\//.test(parsed.pathname)) continue;
+    if (seen.has(absolute)) continue;
+    seen.add(absolute);
+
+    const anchorText = normalizeText(stripHtmlToText(match[2] || ""));
+    const composite = `${normalizeText(absolute)} ${anchorText}`;
+    let score = 0;
+    for (const term of preferredTerms) {
+      if (!term || term.length < 3) continue;
+      if (composite.includes(term)) score += 1;
+    }
+    if (/\b(20\d{2})(?:[-/](0[1-9]|1[0-2]))/.test(absolute)) score += 0.6;
+
+    ranked.push({ url: absolute, score });
+  }
+
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, 8).map((item) => item.url);
+};
+
 const discoverOfficialSearchUrls = async (params: {
   topic: string;
   instructions: string;
   currentContent: string;
   queryTerms: string[];
+  namedTopicAnchors?: string[];
 }) => {
   const domains = buildOfficialSearchDomainsForTopic(params).slice(0, 20);
   const queryCore = params.queryTerms.slice(0, 6).join(" ") || params.topic;
+  const namedAnchors = (params.namedTopicAnchors || []).slice(0, 2).join(" ");
   const discovered = new Set<string>();
+  const trustedNewsFirst: string[] = [];
+  const preferredTerms = Array.from(new Set([...(params.queryTerms || []), ...(params.namedTopicAnchors || [])])).slice(0, 12);
+
+  const pushDiscovered = (url: string) => {
+    if (discovered.has(url)) return;
+    discovered.add(url);
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      if (isTrustedNewsHost(host) && !trustedNewsFirst.includes(url)) {
+        trustedNewsFirst.push(url);
+      }
+    } catch {
+      // no-op
+    }
+  };
+
+  const runSearch = async (activeQuery: string, recency: string) => {
+    const searchUrl = recency
+      ? `https://duckduckgo.com/html/?kl=us-en&df=${recency}&q=${encodeURIComponent(activeQuery)}`
+      : `https://duckduckgo.com/html/?kl=us-en&q=${encodeURIComponent(activeQuery)}`;
+    const response = await fetch(searchUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; ComplyFlowGroundedRetriever/1.0)",
+      },
+    });
+    if (!response.ok) return [];
+    const html = await response.text();
+    return extractDuckDuckGoResultUrls(html);
+  };
+
+  // Start with broad topical/news queries so current-event links are discovered before generic macro pages.
+  const broadQueries = Array.from(new Set([
+    params.topic,
+    namedAnchors ? `${namedAnchors} oil prices economy` : "",
+    `${params.topic} latest news`,
+    `${queryCore} current events`,
+  ].filter(Boolean)));
+
+  if (domains.includes("apnews.com")) {
+    try {
+      const apQuery = namedAnchors ? `${namedAnchors} oil prices economy` : queryCore;
+      const apSearchUrl = `https://apnews.com/search?q=${encodeURIComponent(apQuery)}`;
+      const apResponse = await fetch(apSearchUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; ComplyFlowGroundedRetriever/1.0)",
+        },
+      });
+      if (apResponse.ok) {
+        const apHtml = await apResponse.text();
+        const apArticleUrls = extractApArticleUrlsFromSearchHtml(apHtml, preferredTerms);
+        for (const url of apArticleUrls) {
+          pushDiscovered(url);
+          if (discovered.size >= 12) break;
+        }
+      }
+    } catch {
+      // Ignore AP-specific retrieval failures and continue with broader discovery.
+    }
+  }
+
+  for (const activeQuery of broadQueries) {
+    for (const recency of ["d", "w"]) {
+      try {
+        const resultUrls = await runSearch(activeQuery, recency);
+        for (const url of resultUrls.slice(0, 6)) {
+          pushDiscovered(url);
+          if (discovered.size >= 12) break;
+        }
+      } catch {
+        // Ignore search failures and continue. Retrieval still uses provided/stored sources.
+      }
+      if (discovered.size >= 12) break;
+    }
+    if (discovered.size >= 12) break;
+  }
 
   for (const domain of domains) {
-    const query = `${queryCore} site:${domain}`;
-    const fallbackQuery = `${params.topic} site:${domain}`;
+    const query = `${namedAnchors ? `${namedAnchors} ` : ""}${queryCore} site:${domain}`.trim();
+    const fallbackQuery = `${params.topic} site:${domain}`.trim();
     let matchedThisDomain = false;
 
-    for (const [activeQuery, recency] of [[query, "w"], [fallbackQuery, ""]]) {
+    for (const [activeQuery, recency] of [[query, "d"], [query, "w"], [fallbackQuery, ""]]) {
       try {
-        const searchUrl = recency
-          ? `https://duckduckgo.com/html/?kl=us-en&df=${recency}&q=${encodeURIComponent(activeQuery)}`
-          : `https://duckduckgo.com/html/?kl=us-en&q=${encodeURIComponent(activeQuery)}`;
-        const response = await fetch(searchUrl, {
-          headers: {
-            "User-Agent": "ComplyFlowGroundedRetriever/1.0",
-          },
-        });
-        if (!response.ok) continue;
-
-        const html = await response.text();
-        const resultUrls = extractDuckDuckGoResultUrls(html)
+        const resultUrls = (await runSearch(activeQuery, recency))
           .filter((url) => {
             try {
               const host = new URL(url).hostname.toLowerCase();
@@ -705,26 +875,244 @@ const discoverOfficialSearchUrls = async (params: {
               return false;
             }
           })
-          .slice(0, 3);
+          .slice(0, 2);
 
         if (resultUrls.length > 0) {
           matchedThisDomain = true;
         }
 
         for (const url of resultUrls) {
-          discovered.add(url);
-          if (discovered.size >= 10) break;
+          pushDiscovered(url);
+          if (discovered.size >= 18) break;
         }
       } catch {
         // Ignore search failures and continue. Retrieval still uses provided/stored sources.
       }
-      if (discovered.size >= 10 || matchedThisDomain) break;
+      if (discovered.size >= 18 || matchedThisDomain) break;
     }
 
-    if (discovered.size >= 10) break;
+    if (discovered.size >= 18) break;
   }
 
-  return Array.from(discovered);
+  const ordered = [
+    ...trustedNewsFirst,
+    ...Array.from(discovered).filter((url) => !trustedNewsFirst.includes(url)),
+  ];
+
+  return ordered.slice(0, 18);
+};
+
+const fetchGroundedNewsRssChunks = async (params: {
+  topic: string;
+  queryTerms: string[];
+  topicAnchors: string[];
+  namedTopicAnchors: string[];
+}) => {
+  const query = params.namedTopicAnchors.length > 0
+    ? `${params.namedTopicAnchors.join(" ")} oil prices economy`
+    : (Array.from(new Set([...(params.topicAnchors || []), ...params.queryTerms])).slice(0, 6).join(" ") || params.topic);
+  const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
+
+  const extractTag = (item: string, tag: string) => {
+    const match = item.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
+    if (!match?.[1]) return "";
+    return decodeHtmlEntities(match[1].replace(/<!\[CDATA\[|\]\]>/g, "")).trim();
+  };
+
+  try {
+    const response = await fetch(rssUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; ComplyFlowGroundedRetriever/1.0)",
+      },
+    });
+    if (!response.ok) return [];
+
+    const xml = await response.text();
+    const items = xml.match(/<item>[\s\S]*?<\/item>/gi) || [];
+    const chunks: RetrievedChunk[] = [];
+    let index = 0;
+
+    for (const item of items) {
+      if (chunks.length >= 10) break;
+
+      const title = extractTag(item, "title");
+      const descriptionRaw = extractTag(item, "description");
+      const descriptionText = stripHtmlToText(descriptionRaw);
+      const pubDateRaw = extractTag(item, "pubDate");
+
+      const sourceMatch = item.match(/<source[^>]*url=["']([^"']+)["'][^>]*>([\s\S]*?)<\/source>/i);
+      const sourceUrl = sourceMatch?.[1] ? decodeHtmlEntities(sourceMatch[1]).trim() : "";
+      const sourceName = sourceMatch?.[2] ? decodeHtmlEntities(sourceMatch[2]).trim() : "Google News";
+      const fallbackLink = extractTag(item, "link");
+      let useSourceUrl = false;
+      try {
+        const parsedSource = new URL(sourceUrl);
+        useSourceUrl = Boolean(parsedSource.pathname && parsedSource.pathname !== "/");
+      } catch {
+        useSourceUrl = false;
+      }
+      const canonicalUrl = normalizeCanonicalUrl(useSourceUrl ? sourceUrl : (fallbackLink || sourceUrl));
+      if (!canonicalUrl) continue;
+
+      let sourceHostname = "";
+      try {
+        if (sourceUrl) {
+          sourceHostname = new URL(sourceUrl).hostname.toLowerCase();
+        }
+      } catch {
+        sourceHostname = "";
+      }
+
+      if (sourceHostname && !isGroundedNewsHost(sourceHostname)) continue;
+
+      let canonicalHostname = "";
+      try {
+        canonicalHostname = new URL(canonicalUrl).hostname.toLowerCase();
+      } catch {
+        continue;
+      }
+
+      if (!sourceHostname && !isGroundedNewsHost(canonicalHostname)) continue;
+
+      const chunkText = `${title}. ${descriptionText}`.replace(/\s+/g, " ").trim();
+      if (chunkText.length < 80) continue;
+
+      const parsedDate = new Date(pubDateRaw);
+      const publishedDate = Number.isNaN(parsedDate.getTime()) ? null : parsedDate.toISOString();
+      const sourceId = makeSourceIdFromUrl(canonicalUrl, index);
+
+      const base: Omit<RetrievedChunk, "retrieval_score"> = {
+        id: `${sourceId}_0`,
+        source_id: sourceId,
+        title: title || sourceName || "Grounded News Result",
+        source_type: "grounded_search",
+        canonical_url: canonicalUrl,
+        document_name: null,
+        page_number: null,
+        section_heading: sourceName || null,
+        published_date: publishedDate,
+        chunk_text: chunkText,
+        chunk_index: 0,
+        authority_score: 0.95,
+      };
+
+      chunks.push({
+        ...base,
+        retrieval_score: computeRetrievalScore(
+          base,
+          params.queryTerms,
+          params.topicAnchors,
+          params.namedTopicAnchors,
+        ),
+      });
+      index += 1;
+    }
+
+    return chunks;
+  } catch {
+    // Ignore grounded-news fetch failures.
+    return [];
+  }
+};
+
+const scoreUrlCandidate = (url: string, namedTopicAnchors: string[]) => {
+  let score = 0;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (isTrustedNewsHost(host)) score += 2.2;
+    if (host.endsWith(".gov")) score += 1.8;
+    if (hostInList(host, PRIMARY_NON_GOV_HOSTS)) score += 1.2;
+  } catch {
+    // no-op
+  }
+
+  const normalizedUrl = normalizeText(url);
+  const namedMatches = namedTopicAnchors.filter((term) => normalizedUrl.includes(term)).length;
+  score += namedMatches * 2.8;
+
+  if (/\b(20\d{2})(?:[-/](0[1-9]|1[0-2]))/.test(url)) {
+    score += 0.7;
+  }
+
+  return score;
+};
+
+const selectUrlCandidatesWithHostDiversity = (
+  urls: string[],
+  maxTotal: number,
+  maxPerHost: number,
+) => {
+  const selected: string[] = [];
+  const perHostCount = new Map<string, number>();
+
+  for (const url of urls) {
+    let host = "unknown";
+    try {
+      host = new URL(url).hostname.toLowerCase() || "unknown";
+    } catch {
+      host = "unknown";
+    }
+    const hostCurrent = perHostCount.get(host) || 0;
+    if (hostCurrent >= maxPerHost) continue;
+    selected.push(url);
+    perHostCount.set(host, hostCurrent + 1);
+    if (selected.length >= maxTotal) break;
+  }
+
+  return selected;
+};
+
+const extractCandidateNewsLinksFromHtml = (
+  html: string,
+  baseUrl: string,
+  topicAnchors: string[],
+  namedTopicAnchors: string[],
+) => {
+  const matches = html.matchAll(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi);
+  const ranked: Array<{ url: string; score: number }> = [];
+  const seen = new Set<string>();
+
+  for (const match of matches) {
+    const href = decodeHtmlEntities((match[1] || "").trim());
+    if (!href || href.startsWith("#") || href.startsWith("javascript:")) continue;
+
+    let absolute = "";
+    try {
+      absolute = normalizeCanonicalUrl(new URL(href, baseUrl).toString());
+    } catch {
+      continue;
+    }
+
+    if (!isAllowedOfficialUrl(absolute)) continue;
+
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(absolute);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) continue;
+
+    if (!isTrustedNewsHost(parsed.hostname.toLowerCase())) continue;
+    if (!/\/article\//.test(parsed.pathname)) continue;
+    if (seen.has(absolute)) continue;
+    seen.add(absolute);
+
+    const anchorText = normalizeText(stripHtmlToText(match[2] || ""));
+    const composite = `${normalizeText(absolute)} ${anchorText}`;
+
+    let score = 0;
+    const namedMatches = namedTopicAnchors.filter((term) => composite.includes(term)).length;
+    const topicMatches = topicAnchors.filter((term) => composite.includes(term)).length;
+    score += namedMatches * 3.5;
+    score += topicMatches * 0.9;
+    if (/\b(20\d{2})(?:[-/](0[1-9]|1[0-2]))/.test(absolute)) score += 0.5;
+
+    ranked.push({ url: absolute, score });
+  }
+
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, 5).map((entry) => entry.url);
 };
 
 const fetchOfficialWebChunks = async (
@@ -737,13 +1125,15 @@ const fetchOfficialWebChunks = async (
   const safeUrls = urls
     .map((url) => normalizeCanonicalUrl(url.trim()))
     .filter((url) => Boolean(url) && isAllowedOfficialUrl(url))
-    .slice(0, 14);
+    .slice(0, 18);
 
   for (let i = 0; i < safeUrls.length; i++) {
     const url = safeUrls[i];
+    let parsedUrl: URL | null = null;
     let hostname = "";
     try {
-      hostname = new URL(url).hostname.toLowerCase();
+      parsedUrl = new URL(url);
+      hostname = parsedUrl.hostname.toLowerCase();
     } catch {
       continue;
     }
@@ -755,15 +1145,47 @@ const fetchOfficialWebChunks = async (
     try {
       const response = await fetch(url, {
         headers: {
-          "User-Agent": "ComplyFlowGroundedRetriever/1.0",
+          "User-Agent": "Mozilla/5.0 (compatible; ComplyFlowGroundedRetriever/1.0)",
         },
       });
       if (!response.ok) continue;
 
       const html = await response.text();
+      const lowerHtml = html.toLowerCase();
+      if (
+        lowerHtml.includes("please enable js") ||
+        lowerHtml.includes("captcha") ||
+        lowerHtml.includes("bot verification")
+      ) {
+        continue;
+      }
+
+      const isTrustedListingPage = Boolean(
+        parsedUrl &&
+        isTrustedNewsHost(hostname) &&
+        /^\/(search|hub)(\/|$)/.test(parsedUrl.pathname),
+      );
+      if (isTrustedListingPage) {
+        const discoveredLinks = extractCandidateNewsLinksFromHtml(
+          html,
+          url,
+          topicAnchors,
+          namedTopicAnchors,
+        );
+        for (const discoveredUrl of discoveredLinks) {
+          if (!safeUrls.includes(discoveredUrl) && safeUrls.length < 28) {
+            safeUrls.push(discoveredUrl);
+          }
+        }
+        if (discoveredLinks.length > 0) {
+          continue;
+        }
+      }
+
       const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
       const title = decodeHtmlEntities(titleMatch?.[1]?.replace(/\s+/g, " ").trim() || hostname);
       const text = stripHtmlToText(html).slice(0, 32000);
+      if (text.length < 800) continue;
       const publishedDate = extractPublishedDateFromHtml(html);
       const sectionHeading = extractSectionHeadingFromHtml(html);
       const webSourceType = getWebChunkSourceType(hostname);
@@ -856,15 +1278,40 @@ const retrieveGroundingChunks = async (params: {
     instructions: params.instructions,
     currentContent: params.currentContent,
     queryTerms: Array.from(new Set([...queryTerms, ...topicAnchors])).slice(0, 12),
+    namedTopicAnchors,
   });
-  const urlCandidates = Array.from(
+  const groundedNewsChunks = await fetchGroundedNewsRssChunks({
+    topic: params.topic,
+    queryTerms,
+    topicAnchors,
+    namedTopicAnchors,
+  });
+  const rankedUrlCandidates = Array.from(
     new Set([...(params.sourceUrls || []), ...searchedUrls, ...fallbackUrls]),
-  ).slice(0, 18);
+  )
+    .sort((a, b) => scoreUrlCandidate(b, namedTopicAnchors) - scoreUrlCandidate(a, namedTopicAnchors));
+  const urlCandidates = selectUrlCandidatesWithHostDiversity(rankedUrlCandidates, 22, 6);
   const webChunks = await fetchOfficialWebChunks(urlCandidates, queryTerms, topicAnchors, namedTopicAnchors);
-  const merged = dedupeChunks([...scoredStored, ...webChunks])
+  const merged = dedupeChunks([...scoredStored, ...groundedNewsChunks, ...webChunks])
     .sort((a, b) => b.retrieval_score - a.retrieval_score);
+  const anchorPriorityChunks = namedTopicAnchors.length > 0
+    ? merged.filter((chunk) => chunkMentionsAnyTerm(chunk, namedTopicAnchors))
+    : [];
+  const supplementalChunks = merged.filter((chunk) => !anchorPriorityChunks.includes(chunk));
+  const rankedChunks = anchorPriorityChunks.length > 0
+    ? [...anchorPriorityChunks, ...supplementalChunks]
+    : merged;
+  const groundedSearchAnchorChunks = namedTopicAnchors.length > 0
+    ? rankedChunks.filter((chunk) => (
+      chunk.source_type === "grounded_search" && chunkMentionsAnyTerm(chunk, namedTopicAnchors)
+    ))
+    : [];
+  const remainingAfterGroundedSearch = rankedChunks.filter((chunk) => !groundedSearchAnchorChunks.includes(chunk));
+  const finalRankedChunks = groundedSearchAnchorChunks.length > 0
+    ? [...groundedSearchAnchorChunks, ...remainingAfterGroundedSearch]
+    : rankedChunks;
 
-  const topChunks = merged.slice(0, 14);
+  const topChunks = selectTopChunksWithSourceDiversity(finalRankedChunks, 14, 4, 6);
   const strongestScore = topChunks[0]?.retrieval_score || 0;
   const hasStrongGrounding = topChunks.length >= 2 && strongestScore >= 2.5;
   const hasNamedAnchorCoverage = namedTopicAnchors.length === 0 || topChunks.some((chunk) => (
