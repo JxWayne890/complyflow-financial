@@ -380,6 +380,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [shortDuration, setShortDuration] = useState<1 | 2 | 3>(1);
   const [variationCount, setVariationCount] = useState<number>(1);
   const [chartData, setChartData] = useState<any | null>(null);
+  const [chartResizeKey, setChartResizeKey] = useState(0);
   const [citations, setCitations] = useState<CitationPayloadItem[]>([]);
   const [sources, setSources] = useState<CitationSourceItem[]>([]);
   const [sourceLimitations, setSourceLimitations] = useState<string>('');
@@ -3047,7 +3048,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   };
 
-  const renderChartCard = useCallback((data: any, inline = false) => {
+  const renderChartCard = useCallback((data: any, inline = false, resizeKey = 0) => {
     if (!data) return null;
 
     return (
@@ -3067,8 +3068,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             </p>
           )}
 
-          <div className="w-full" style={{ height: data.type === 'horizontalBar' ? `${Math.max(300, (data.data?.length || 5) * 55)}px` : '360px' }}>
-            <ResponsiveContainer width="100%" height="100%">
+          <div className="w-full min-w-0" style={{ height: data.type === 'horizontalBar' ? `${Math.max(300, (data.data?.length || 5) * 55)}px` : '360px' }}>
+            <ResponsiveContainer key={`chart-${inline ? 'inline' : 'block'}-${resizeKey}`} width="100%" height="100%">
               {data.type === 'stackedBar' ? (
                 <BarChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -3170,6 +3171,26 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   }, []);
 
   useEffect(() => {
+    let frameId: number | null = null;
+    const handleWindowResize = () => {
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
+      frameId = window.requestAnimationFrame(() => {
+        setChartResizeKey((prev) => prev + 1);
+      });
+    };
+
+    window.addEventListener('resize', handleWindowResize);
+    return () => {
+      window.removeEventListener('resize', handleWindowResize);
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     const roots = inlineChartRootsRef.current;
 
     if (!editorRef.current || !chartData || content?.body?.includes('<!DOCTYPE html>')) {
@@ -3193,9 +3214,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         root = createRoot(node);
         roots.set(node, root);
       }
-      root.render(renderChartCard(chartData, true));
+      root.render(renderChartCard(chartData, true, chartResizeKey));
     });
-  }, [chartData, content?.body, renderChartCard]);
+  }, [chartData, chartResizeKey, content?.body, renderChartCard]);
 
   useEffect(() => {
     return () => {
@@ -4104,7 +4125,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   </div>
                 )}
 
-                {chartData && !content.body.includes('data-cf-chart-slot="true"') && renderChartCard(chartData)}
+                {chartData && !content.body.includes('data-cf-chart-slot="true"') && renderChartCard(chartData, false, chartResizeKey)}
 
                 {(groundingStatus || sourceLimitations) && (
                   <div className="shrink-0 mt-10 pt-6 border-t border-slate-100">
