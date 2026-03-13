@@ -270,6 +270,106 @@ const sourceTypeBoost = (sourceType: string) => {
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
+const TRACKING_QUERY_PARAMS = [
+  "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid",
+];
+
+const isAllowedOfficialHost = (hostname: string) => {
+  const host = (hostname || "").toLowerCase();
+  return (
+    host.endsWith(".gov") ||
+    host.endsWith(".mil") ||
+    host.endsWith(".edu") ||
+    host.includes("sec.gov") ||
+    host.includes("finra.org") ||
+    host.includes("irs.gov") ||
+    host.includes("federalreserve.gov") ||
+    host.includes("treasury.gov") ||
+    host.includes("bls.gov") ||
+    host.includes("bea.gov")
+  );
+};
+
+const isAllowedOfficialUrl = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    return isAllowedOfficialHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+};
+
+const normalizeCanonicalUrl = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    for (const param of TRACKING_QUERY_PARAMS) {
+      parsed.searchParams.delete(param);
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+};
+
+const decodeHtmlEntities = (value: string) =>
+  (value || "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&#x27;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">");
+
+const stripHtmlToText = (html: string) =>
+  (html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const extractPublishedDateFromHtml = (html: string) => {
+  const patterns = [
+    /<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+name=["'](?:pubdate|publishdate|date|dc\.date|dcterms\.issued)["'][^>]+content=["']([^"']+)["']/i,
+    /"datePublished"\s*:\s*"([^"]+)"/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    const raw = (match?.[1] || "").trim();
+    if (!raw) continue;
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) continue;
+    return parsed.toISOString();
+  }
+  return null;
+};
+
+const extractSectionHeadingFromHtml = (html: string) => {
+  const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  if (!h1Match?.[1]) return null;
+  const text = decodeHtmlEntities(stripHtmlToText(h1Match[1])).slice(0, 220).trim();
+  return text || null;
+};
+
+const publishedDateBoost = (publishedDate?: string | null) => {
+  if (!publishedDate) return 0;
+  const publishedMs = Date.parse(publishedDate);
+  if (Number.isNaN(publishedMs)) return 0;
+
+  const daysOld = (Date.now() - publishedMs) / 86400000;
+  if (daysOld <= 7) return 1.4;
+  if (daysOld <= 30) return 1.1;
+  if (daysOld <= 180) return 0.8;
+  if (daysOld <= 365) return 0.5;
+  if (daysOld <= 730) return 0.2;
+  return 0;
+};
+
 const computeRetrievalScore = (chunk: Omit<RetrievedChunk, "retrieval_score">, queryTerms: string[]) => {
   const haystack = normalizeText(`${chunk.title} ${chunk.section_heading || ""} ${chunk.chunk_text}`);
   const titleHaystack = normalizeText(chunk.title || "");
@@ -286,7 +386,13 @@ const computeRetrievalScore = (chunk: Omit<RetrievedChunk, "retrieval_score">, q
     ? clamp(chunk.authority_score / 25, 0, 2)
     : 0;
 
-  return lexical + authority + sourceTypeBoost(chunk.source_type) + officialDomainBoost(chunk.canonical_url);
+  return (
+    lexical +
+    authority +
+    sourceTypeBoost(chunk.source_type) +
+    officialDomainBoost(chunk.canonical_url) +
+    publishedDateBoost(chunk.published_date)
+  );
 };
 
 const dedupeChunks = (chunks: RetrievedChunk[]) => {
@@ -367,12 +473,131 @@ const getFallbackOfficialUrlsForTopic = (params: {
   return Array.from(urls).slice(0, 6);
 };
 
+const buildOfficialSearchDomainsForTopic = (params: {
+  topic: string;
+  instructions: string;
+  currentContent: string;
+}) => {
+  const context = normalizeText(`${params.topic} ${params.instructions || ""} ${(params.currentContent || "").slice(0, 1500)}`);
+  const domains = new Set<string>();
+
+  // Finance/compliance defaults
+  domains.add("irs.gov");
+  domains.add("sec.gov");
+  domains.add("investor.gov");
+  domains.add("federalreserve.gov");
+  domains.add("treasury.gov");
+  domains.add("bls.gov");
+  domains.add("bea.gov");
+  domains.add("finra.org");
+
+  if (/\b(ira|roth|backdoor|retirement account|retirement arrangement)\b/.test(context)) {
+    domains.add("irs.gov");
+    domains.add("investor.gov");
+  }
+
+  if (/\b(security|securities|etf|mutual fund|prospectus|filing|10-k|10q|10-q)\b/.test(context)) {
+    domains.add("sec.gov");
+  }
+
+  if (/\b(inflation|cpi|employment|labor|wage|unemployment)\b/.test(context)) {
+    domains.add("bls.gov");
+  }
+
+  if (/\b(gdp|personal consumption|national accounts)\b/.test(context)) {
+    domains.add("bea.gov");
+  }
+
+  if (/\b(interest rate|federal funds|fomc|monetary policy)\b/.test(context)) {
+    domains.add("federalreserve.gov");
+  }
+
+  return Array.from(domains).slice(0, 6);
+};
+
+const extractDuckDuckGoResultUrls = (html: string) => {
+  const urls: string[] = [];
+  const matches = html.matchAll(/<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]+href=["']([^"']+)["']/gi);
+
+  for (const match of matches) {
+    let href = decodeHtmlEntities((match[1] || "").trim());
+    if (!href) continue;
+
+    if (href.startsWith("//")) {
+      href = `https:${href}`;
+    }
+
+    if (href.includes("duckduckgo.com/l/?")) {
+      try {
+        const redirectUrl = new URL(href, "https://duckduckgo.com");
+        const actual = redirectUrl.searchParams.get("uddg");
+        if (actual) {
+          href = decodeURIComponent(actual);
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (!isAllowedOfficialUrl(href)) continue;
+    urls.push(normalizeCanonicalUrl(href));
+  }
+
+  return Array.from(new Set(urls));
+};
+
+const discoverOfficialSearchUrls = async (params: {
+  topic: string;
+  instructions: string;
+  currentContent: string;
+  queryTerms: string[];
+}) => {
+  const domains = buildOfficialSearchDomainsForTopic(params);
+  const queryCore = params.queryTerms.slice(0, 6).join(" ") || params.topic;
+  const year = new Date().getUTCFullYear();
+  const discovered = new Set<string>();
+
+  for (const domain of domains) {
+    const query = `${queryCore} ${year} site:${domain}`;
+    try {
+      const searchUrl = `https://duckduckgo.com/html/?kl=us-en&df=y&q=${encodeURIComponent(query)}`;
+      const response = await fetch(searchUrl, {
+        headers: {
+          "User-Agent": "ComplyFlowGroundedRetriever/1.0",
+        },
+      });
+      if (!response.ok) continue;
+
+      const html = await response.text();
+      const resultUrls = extractDuckDuckGoResultUrls(html)
+        .filter((url) => {
+          try {
+            return new URL(url).hostname.toLowerCase().includes(domain);
+          } catch {
+            return false;
+          }
+        })
+        .slice(0, 3);
+
+      for (const url of resultUrls) {
+        discovered.add(url);
+        if (discovered.size >= 10) break;
+      }
+    } catch {
+      // Ignore search failures and continue. Retrieval still uses provided/stored sources.
+    }
+    if (discovered.size >= 10) break;
+  }
+
+  return Array.from(discovered);
+};
+
 const fetchOfficialWebChunks = async (urls: string[], queryTerms: string[]) => {
   const chunks: RetrievedChunk[] = [];
   const safeUrls = urls
-    .map((url) => url.trim())
-    .filter(Boolean)
-    .slice(0, 6);
+    .map((url) => normalizeCanonicalUrl(url.trim()))
+    .filter((url) => Boolean(url) && isAllowedOfficialUrl(url))
+    .slice(0, 8);
 
   for (let i = 0; i < safeUrls.length; i++) {
     const url = safeUrls[i];
@@ -383,14 +608,7 @@ const fetchOfficialWebChunks = async (urls: string[], queryTerms: string[]) => {
       continue;
     }
 
-    if (
-      !hostname.endsWith(".gov") &&
-      !hostname.endsWith(".mil") &&
-      !hostname.endsWith(".edu") &&
-      !hostname.includes("sec.gov") &&
-      !hostname.includes("finra.org") &&
-      !hostname.includes("irs.gov")
-    ) {
+    if (!isAllowedOfficialHost(hostname)) {
       continue;
     }
 
@@ -404,15 +622,10 @@ const fetchOfficialWebChunks = async (urls: string[], queryTerms: string[]) => {
 
       const html = await response.text();
       const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
-      const title = titleMatch?.[1]?.replace(/\s+/g, " ").trim() || hostname;
-      const text = html
-        .replace(/<script[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style[\s\S]*?<\/style>/gi, " ")
-        .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 28000);
+      const title = decodeHtmlEntities(titleMatch?.[1]?.replace(/\s+/g, " ").trim() || hostname);
+      const text = stripHtmlToText(html).slice(0, 32000);
+      const publishedDate = extractPublishedDateFromHtml(html);
+      const sectionHeading = extractSectionHeadingFromHtml(html);
 
       const parts = chunkLongText(text, 900, 120);
       const sourceId = makeSourceIdFromUrl(url, i);
@@ -425,11 +638,11 @@ const fetchOfficialWebChunks = async (urls: string[], queryTerms: string[]) => {
           canonical_url: url,
           document_name: null,
           page_number: null,
-          section_heading: null,
-          published_date: null,
+          section_heading: sectionHeading,
+          published_date: publishedDate,
           chunk_text: parts[index],
           chunk_index: index,
-          authority_score: 0.8,
+          authority_score: 1.2,
         };
 
         chunks.push({
@@ -493,7 +706,15 @@ const retrieveGroundingChunks = async (params: {
     instructions: params.instructions,
     currentContent: params.currentContent,
   });
-  const urlCandidates = Array.from(new Set([...(params.sourceUrls || []), ...fallbackUrls])).slice(0, 8);
+  const searchedUrls = await discoverOfficialSearchUrls({
+    topic: params.topic,
+    instructions: params.instructions,
+    currentContent: params.currentContent,
+    queryTerms,
+  });
+  const urlCandidates = Array.from(
+    new Set([...(params.sourceUrls || []), ...searchedUrls, ...fallbackUrls]),
+  ).slice(0, 10);
   const webChunks = await fetchOfficialWebChunks(urlCandidates, queryTerms);
   const merged = dedupeChunks([...scoredStored, ...webChunks])
     .sort((a, b) => b.retrieval_score - a.retrieval_score);
