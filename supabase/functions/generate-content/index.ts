@@ -233,6 +233,36 @@ const extractQueryTerms = (query: string) => {
     .slice(0, 24);
 };
 
+const TOPIC_STOP_WORDS = new Set([
+  "how", "what", "when", "where", "why", "who", "impact", "impacts", "affect", "affects",
+  "effect", "effects", "economy", "economic", "global", "market", "markets", "price", "prices",
+  "analysis", "understanding", "guide", "overview", "update", "latest",
+]);
+
+const extractNamedTopicAnchors = (topic: string) => {
+  const matches = topic.match(/\b[A-Z][a-z]+\b/g) || [];
+  return Array.from(
+    new Set(
+      matches
+        .map((value) => value.toLowerCase())
+        .filter((value) => value.length >= 3 && !TOPIC_STOP_WORDS.has(value)),
+    ),
+  ).slice(0, 4);
+};
+
+const extractGeneralTopicAnchors = (topic: string) => {
+  return normalizeText(topic)
+    .split(" ")
+    .filter((value) => value.length >= 4 && !TOPIC_STOP_WORDS.has(value))
+    .slice(0, 6);
+};
+
+const chunkMentionsAnyTerm = (chunk: Omit<RetrievedChunk, "retrieval_score">, terms: string[]) => {
+  if (!terms.length) return false;
+  const haystack = normalizeText(`${chunk.title} ${chunk.section_heading || ""} ${chunk.chunk_text}`);
+  return terms.some((term) => haystack.includes(term));
+};
+
 const PRIMARY_NON_GOV_HOSTS = [
   "oecd.org",
   "imf.org",
@@ -402,7 +432,12 @@ const publishedDateBoost = (publishedDate?: string | null) => {
   return 0;
 };
 
-const computeRetrievalScore = (chunk: Omit<RetrievedChunk, "retrieval_score">, queryTerms: string[]) => {
+const computeRetrievalScore = (
+  chunk: Omit<RetrievedChunk, "retrieval_score">,
+  queryTerms: string[],
+  topicAnchors: string[],
+  namedTopicAnchors: string[],
+) => {
   const haystack = normalizeText(`${chunk.title} ${chunk.section_heading || ""} ${chunk.chunk_text}`);
   const titleHaystack = normalizeText(chunk.title || "");
   const sectionHaystack = normalizeText(chunk.section_heading || "");
@@ -418,13 +453,29 @@ const computeRetrievalScore = (chunk: Omit<RetrievedChunk, "retrieval_score">, q
     ? clamp(chunk.authority_score / 25, 0, 2)
     : 0;
 
-  return (
+  let score = (
     lexical +
     authority +
     sourceTypeBoost(chunk.source_type) +
     officialDomainBoost(chunk.canonical_url) +
     publishedDateBoost(chunk.published_date)
   );
+
+  const topicAnchorMatches = topicAnchors.filter((term) => haystack.includes(term)).length;
+  if (topicAnchorMatches > 0) {
+    score += topicAnchorMatches * 0.85;
+  }
+
+  if (namedTopicAnchors.length > 0) {
+    const namedMatches = namedTopicAnchors.filter((term) => haystack.includes(term)).length;
+    if (namedMatches === 0) {
+      score *= 0.28;
+    } else {
+      score += namedMatches * 2.2;
+    }
+  }
+
+  return score;
 };
 
 const dedupeChunks = (chunks: RetrievedChunk[]) => {
@@ -471,6 +522,7 @@ const getFallbackOfficialUrlsForTopic = (params: {
 }) => {
   const context = normalizeText(`${params.topic} ${params.instructions || ""} ${(params.currentContent || "").slice(0, 1500)}`);
   const urls = new Set<string>();
+  const isGeoEnergyTopic = /\b(oil|crude|brent|wti|energy|gasoline|opec|middle east|iran|war|geopolitic|strait of hormuz|supply shock)\b/.test(context);
 
   if (
     /\b(ira|roth|traditional ira|backdoor|retirement account|retirement arrangement)\b/.test(context)
@@ -502,7 +554,17 @@ const getFallbackOfficialUrlsForTopic = (params: {
     urls.add("https://www.federalreserve.gov/newsevents/pressreleases/monetary.htm");
   }
 
-  return Array.from(urls).slice(0, 6);
+  if (isGeoEnergyTopic) {
+    urls.add("https://www.eia.gov/petroleum/");
+    urls.add("https://www.eia.gov/outlooks/steo/");
+    urls.add("https://www.eia.gov/todayinenergy/");
+    urls.add("https://www.iea.org/topics/oil-market-report");
+    urls.add("https://www.opec.org/opec_web/en/press_room/");
+    urls.add("https://www.reuters.com/world/middle-east/");
+    urls.add("https://apnews.com/hub/middle-east");
+  }
+
+  return Array.from(urls).slice(0, 10);
 };
 
 const buildOfficialSearchDomainsForTopic = (params: {
@@ -512,25 +574,29 @@ const buildOfficialSearchDomainsForTopic = (params: {
 }) => {
   const context = normalizeText(`${params.topic} ${params.instructions || ""} ${(params.currentContent || "").slice(0, 1500)}`);
   const domains = new Set<string>();
+  const isRetirementTaxTopic = /\b(ira|roth|backdoor|retirement account|retirement arrangement|tax|taxes|contribution|deduction)\b/.test(context);
+  const isSecuritiesTopic = /\b(security|securities|etf|mutual fund|prospectus|filing|10-k|10q|10-q)\b/.test(context);
+  const isGeoEnergyTopic = /\b(oil|crude|brent|wti|energy|gasoline|opec|middle east|iran|war|geopolitic|strait of hormuz|supply shock)\b/.test(context);
+  const isGlobalMacroTopic = /\b(global|international|cross-border|geopolitic|trade|macro|recession|growth)\b/.test(context);
 
-  // Default domains (kept lean to avoid excessive search latency)
-  domains.add("irs.gov");
-  domains.add("sec.gov");
+  // Default macro/public data domains
   domains.add("federalreserve.gov");
   domains.add("treasury.gov");
   domains.add("bls.gov");
   domains.add("bea.gov");
-  domains.add("reuters.com");
-  domains.add("apnews.com");
 
-  if (/\b(ira|roth|backdoor|retirement account|retirement arrangement)\b/.test(context)) {
+  if (isRetirementTaxTopic) {
     domains.add("irs.gov");
     domains.add("investor.gov");
     domains.add("finra.org");
+    domains.add("reuters.com");
+    domains.add("apnews.com");
   }
 
-  if (/\b(security|securities|etf|mutual fund|prospectus|filing|10-k|10q|10-q)\b/.test(context)) {
+  if (isSecuritiesTopic) {
     domains.add("sec.gov");
+    domains.add("investor.gov");
+    domains.add("finra.org");
   }
 
   if (/\b(inflation|cpi|employment|labor|wage|unemployment)\b/.test(context)) {
@@ -545,16 +611,25 @@ const buildOfficialSearchDomainsForTopic = (params: {
     domains.add("federalreserve.gov");
   }
 
-  if (/\b(global|international|cross-border|geopolitic|trade|macro)\b/.test(context)) {
+  if (isGlobalMacroTopic) {
     domains.add("imf.org");
     domains.add("worldbank.org");
     domains.add("oecd.org");
+    domains.add("reuters.com");
+    domains.add("apnews.com");
   }
 
-  if (/\b(oil|crude|brent|energy|gasoline|opec|middle east|iran|war|geopolitic|supply shock)\b/.test(context)) {
+  if (isGeoEnergyTopic) {
     domains.add("eia.gov");
     domains.add("iea.org");
     domains.add("opec.org");
+    domains.add("imf.org");
+    domains.add("worldbank.org");
+    domains.add("reuters.com");
+    domains.add("apnews.com");
+  }
+
+  if (!isRetirementTaxTopic && !isSecuritiesTopic && !isGeoEnergyTopic) {
     domains.add("reuters.com");
     domains.add("apnews.com");
   }
@@ -652,7 +727,12 @@ const discoverOfficialSearchUrls = async (params: {
   return Array.from(discovered);
 };
 
-const fetchOfficialWebChunks = async (urls: string[], queryTerms: string[]) => {
+const fetchOfficialWebChunks = async (
+  urls: string[],
+  queryTerms: string[],
+  topicAnchors: string[],
+  namedTopicAnchors: string[],
+) => {
   const chunks: RetrievedChunk[] = [];
   const safeUrls = urls
     .map((url) => normalizeCanonicalUrl(url.trim()))
@@ -709,7 +789,7 @@ const fetchOfficialWebChunks = async (urls: string[], queryTerms: string[]) => {
 
         chunks.push({
           ...base,
-          retrieval_score: computeRetrievalScore(base, queryTerms),
+          retrieval_score: computeRetrievalScore(base, queryTerms, topicAnchors, namedTopicAnchors),
         });
       }
     } catch {
@@ -730,6 +810,9 @@ const retrieveGroundingChunks = async (params: {
 }) => {
   const query = `${params.topic}\n${params.instructions || ""}\n${(params.currentContent || "").slice(0, 1200)}`.trim();
   const queryTerms = extractQueryTerms(query);
+  const namedTopicAnchors = extractNamedTopicAnchors(params.topic);
+  const generalTopicAnchors = extractGeneralTopicAnchors(params.topic);
+  const topicAnchors = Array.from(new Set([...namedTopicAnchors, ...generalTopicAnchors])).slice(0, 8);
 
   const { data: storedChunks, error } = await params.supabaseAdmin
     .from("citation_source_chunks")
@@ -759,7 +842,7 @@ const retrieveGroundingChunks = async (params: {
     };
     return {
       ...base,
-      retrieval_score: computeRetrievalScore(base, queryTerms),
+      retrieval_score: computeRetrievalScore(base, queryTerms, topicAnchors, namedTopicAnchors),
     };
   });
 
@@ -772,18 +855,21 @@ const retrieveGroundingChunks = async (params: {
     topic: params.topic,
     instructions: params.instructions,
     currentContent: params.currentContent,
-    queryTerms,
+    queryTerms: Array.from(new Set([...queryTerms, ...topicAnchors])).slice(0, 12),
   });
   const urlCandidates = Array.from(
     new Set([...(params.sourceUrls || []), ...searchedUrls, ...fallbackUrls]),
   ).slice(0, 18);
-  const webChunks = await fetchOfficialWebChunks(urlCandidates, queryTerms);
+  const webChunks = await fetchOfficialWebChunks(urlCandidates, queryTerms, topicAnchors, namedTopicAnchors);
   const merged = dedupeChunks([...scoredStored, ...webChunks])
     .sort((a, b) => b.retrieval_score - a.retrieval_score);
 
   const topChunks = merged.slice(0, 14);
   const strongestScore = topChunks[0]?.retrieval_score || 0;
   const hasStrongGrounding = topChunks.length >= 2 && strongestScore >= 2.5;
+  const hasNamedAnchorCoverage = namedTopicAnchors.length === 0 || topChunks.some((chunk) => (
+    chunkMentionsAnyTerm(chunk, namedTopicAnchors)
+  ));
   const hasUsableGrounding = topChunks.length >= 1;
 
   return {
@@ -791,6 +877,8 @@ const retrieveGroundingChunks = async (params: {
     chunks: topChunks,
     hasStrongGrounding,
     hasUsableGrounding,
+    hasNamedAnchorCoverage,
+    namedTopicAnchors,
   };
 };
 
@@ -1933,6 +2021,7 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
     let retrievalQuery = "";
     let groundingStatus: "grounded" | "limited" | "ungrounded" = "ungrounded";
     let sourceLimitations = "";
+    let namedTopicAnchors: string[] = [];
 
     if (shouldGround) {
       if (!normalizedOrgId) {
@@ -1950,10 +2039,15 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
 
       retrievedChunks = retrieval.chunks;
       retrievalQuery = retrieval.query;
+      namedTopicAnchors = retrieval.namedTopicAnchors || [];
       groundingStatus = retrieval.hasStrongGrounding ? "grounded" : (retrievedChunks.length > 0 ? "limited" : "ungrounded");
       sourceLimitations = retrieval.hasStrongGrounding
         ? ""
-        : "Retrieved evidence was limited; grounded output may be narrower than requested.";
+        : retrieval.hasNamedAnchorCoverage
+          ? "Retrieved evidence was limited; grounded output may be narrower than requested."
+          : namedTopicAnchors.length > 0
+            ? `Retrieved sources did not sufficiently address the core topic entity/entities: ${namedTopicAnchors.join(", ")}.`
+            : "Retrieved evidence was limited; grounded output may be narrower than requested.";
 
       if (!retrieval.hasUsableGrounding) {
         const failureMessage = "I could not verify this from the available sources.";
@@ -2005,6 +2099,9 @@ If comparing two sets of metrics across categories, include dataKey2, dataLabel2
 
     if (shouldGround) {
       const retrievalContext = buildGroundingContextForPrompt(retrievedChunks);
+      const topicEntityHint = namedTopicAnchors.length > 0
+        ? `Core topic entities that must remain central (when evidence exists): ${namedTopicAnchors.join(", ")}.`
+        : "No named entity constraint.";
       systemPrompt = `${legacyWealthBlogStyle}
 
 Grounding policy (must follow):
@@ -2012,7 +2109,10 @@ Grounding policy (must follow):
 - Never cite, reference, or imply any source that is not in retrieved chunks.
 - If sources conflict, explicitly describe the conflict with citations on both sides.
 - If a statement is inference/synthesis, label that sentence with "(Inference)" and cite supporting chunks.
-- If evidence is incomplete, state that uncertainty briefly under "source_limitations".`;
+- If evidence is incomplete, state that uncertainty briefly under "source_limitations".
+- Do not pivot to a different subtopic just because evidence is stronger elsewhere.
+- Keep the requested topic central in title, lead, and section framing.
+- ${topicEntityHint}`;
 
       userContent = `User request topic: ${topic}
 Length requirement: ${lengthInstruction}
@@ -2046,6 +2146,9 @@ Return STRICT JSON with exactly these keys:
 JSON constraints:
 - "citations" must only reference source_id + chunk_index pairs that exist in retrieved chunks.
 - Every factual compliance claim should include at least one citation marker.
+- Keep the article focused on the requested topic; do not switch to an unrelated angle.
+- Mention the requested core entities directly when supported by retrieved chunks.
+- If retrieved chunks do not support those entities, state that limitation explicitly in the first section.
 - Keep quoted_span short (max ~240 chars), and it must appear in the cited chunk.
 - If a chart is not needed, set "chart_data" to null.
 - Do not include Markdown code fences.
@@ -2086,6 +2189,9 @@ JSON constraints:
     if (action === "extend") {
       if (shouldGround) {
         const retrievalContext = buildGroundingContextForPrompt(retrievedChunks);
+        const topicEntityHint = namedTopicAnchors.length > 0
+          ? `Core topic entities that must remain central (when evidence exists): ${namedTopicAnchors.join(", ")}.`
+          : "No named entity constraint.";
         systemPrompt = `${legacyWealthBlogStyle}
 
 Grounding policy (must follow):
@@ -2093,7 +2199,10 @@ Grounding policy (must follow):
 - Never cite, reference, or imply any source that is not in retrieved chunks.
 - If sources conflict, explicitly describe the conflict with citations on both sides.
 - If a statement is inference/synthesis, label that sentence with "(Inference)" and cite supporting chunks.
-- If evidence is incomplete, state that uncertainty briefly under "source_limitations".`;
+- If evidence is incomplete, state that uncertainty briefly under "source_limitations".
+- Do not pivot to a different subtopic just because evidence is stronger elsewhere.
+- Keep the requested topic central in title, lead, and section framing.
+- ${topicEntityHint}`;
 
         userContent = `User request topic: ${topic}
 Length requirement: ${lengthInstruction}
@@ -2131,6 +2240,9 @@ JSON constraints:
 - Expand and improve the draft substantially while preserving core meaning and structure.
 - "citations" must only reference source_id + chunk_index pairs that exist in retrieved chunks.
 - Every factual compliance claim should include at least one citation marker.
+- Keep the article focused on the requested topic; do not switch to an unrelated angle.
+- Mention the requested core entities directly when supported by retrieved chunks.
+- If retrieved chunks do not support those entities, state that limitation explicitly in the first section.
 - Keep quoted_span short (max ~240 chars), and it must appear in the cited chunk.
 - If a chart is not needed, set "chart_data" to null.
 - Do not include Markdown code fences.
@@ -2325,6 +2437,7 @@ IMPORTANT: Return ONLY the rewritten passage.
         const outputParts: string[] = [];
         const allLines = markdownForBody.split('\n');
         let currentParagraph: string[] = [];
+        let renderedPrimaryHeading = false;
 
         const flushParagraph = () => {
           if (currentParagraph.length > 0) {
@@ -2360,6 +2473,7 @@ IMPORTANT: Return ONLY the rewritten passage.
             if (!finalTitle || finalTitle === title) {
               finalTitle = text;
             }
+            renderedPrimaryHeading = true;
             outputParts.push(`<h1 style="font-size: 1.8rem; font-weight: 800; color: #0f172a; margin-top: 0; margin-bottom: 8px;">${text}</h1>`);
           } else {
             // Regular text line — accumulate into paragraph
@@ -2374,8 +2488,10 @@ IMPORTANT: Return ONLY the rewritten passage.
           htmlBody = '<p>No content generated.</p>';
         }
 
-        // Prepend the title as a big bold heading at the very top of the body
-        htmlBody = `<h1 style="font-size: 2.2rem; font-weight: 800; color: #0f172a; margin-top: 0; margin-bottom: 20px; line-height: 1.15; letter-spacing: -0.02em;">${finalTitle}</h1>\n` + htmlBody;
+        // Prepend a large primary heading only when markdown did not already include one.
+        if (!renderedPrimaryHeading) {
+          htmlBody = `<h1 style="font-size: 2.2rem; font-weight: 800; color: #0f172a; margin-top: 0; margin-bottom: 20px; line-height: 1.15; letter-spacing: -0.02em;">${finalTitle}</h1>\n` + htmlBody;
+        }
 
         if (shouldGround) {
           htmlBody = appendGroundedSourcesToHtml({
