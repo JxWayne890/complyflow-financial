@@ -679,6 +679,11 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     return body.innerHTML.trim();
   }, []);
 
+  const normalizeBlogBodyWithChartSlot = useCallback((html: string, nextChartData: any | null) => {
+    const sanitized = sanitizeBlogBodyForStorage(html);
+    return ensureBlogChartSlot(sanitized, nextChartData);
+  }, [ensureBlogChartSlot, sanitizeBlogBodyForStorage]);
+
   const normalizeInlineImageHtml = useCallback((html: string) => {
     if (!html) return html;
     if (html.includes('data-cf-inline-image="true"')) return html;
@@ -885,7 +890,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     };
 
     const sanitizedTitle = sanitizeNoEmDashes(payload.title);
-    const sanitizedBody = sanitizeNoEmDashes(sanitizeBlogBodyForStorage(payload.body));
+    const normalizedBody = isBlogArticle
+      ? normalizeBlogBodyWithChartSlot(payload.body, payload.chart_data ?? null)
+      : sanitizeBlogBodyForStorage(payload.body);
+    const sanitizedBody = sanitizeNoEmDashes(normalizedBody);
     const sanitizedDisclaimers = sanitizeNoEmDashes(payload.disclaimers);
 
     const nextVersion = (content?.version_number || 0) + 1;
@@ -925,13 +933,23 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const saveCurrentEditorVersion = async (targetRequestId: string) => {
     if (!content) return null;
     const latestBodyRaw = editorRef.current?.innerHTML || content.body || '';
-    const latestBody = sanitizeBlogBodyForStorage(
-      latestBodyRaw.replace(/class="new-content-highlight"/g, '').trim()
-    );
+    const latestBody = isBlogArticle
+      ? normalizeBlogBodyWithChartSlot(
+        latestBodyRaw.replace(/class="new-content-highlight"/g, '').trim(),
+        chartData,
+      )
+      : sanitizeBlogBodyForStorage(
+        latestBodyRaw.replace(/class="new-content-highlight"/g, '').trim()
+      );
     const latestTitle = (content.title || '').trim();
-    const existingBody = sanitizeBlogBodyForStorage(
-      (content.body || '').replace(/class="new-content-highlight"/g, '').trim()
-    );
+    const existingBody = isBlogArticle
+      ? normalizeBlogBodyWithChartSlot(
+        (content.body || '').replace(/class="new-content-highlight"/g, '').trim(),
+        chartData,
+      )
+      : sanitizeBlogBodyForStorage(
+        (content.body || '').replace(/class="new-content-highlight"/g, '').trim()
+      );
     const existingTitle = (content.title || '').trim();
 
     if (latestBody === existingBody && latestTitle === existingTitle) {
@@ -3294,6 +3312,19 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     };
   }, []);
 
+  useEffect(() => {
+    if (!content || !isBlogArticle || content.body.includes('<!DOCTYPE html>')) return;
+
+    const normalizedBody = normalizeBlogBodyWithChartSlot(content.body || '', chartData);
+    if (normalizedBody === content.body) return;
+
+    setContent((prev) => {
+      if (!prev) return prev;
+      if (prev.body === normalizedBody) return prev;
+      return { ...prev, body: normalizedBody };
+    });
+  }, [chartData, content, isBlogArticle, normalizeBlogBodyWithChartSlot]);
+
   const textProviderLabel = textProvider === 'kimi' ? 'Kimi K2.5 (NVIDIA NIM)' : 'Claude';
   const imageProviderLabel = imageProvider === 'chatgpt' ? 'ChatGPT Image' : 'Gemini Image (Nano Banana)';
   const imageProviderShortLabel = imageProvider === 'chatgpt' ? 'ChatGPT' : 'Gemini';
@@ -4147,7 +4178,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     if (nextFocused?.closest('#cfIframePill')) {
                       return;
                     }
-                    const nextBody = sanitizeBlogBodyForStorage(e.currentTarget.innerHTML);
+                    const nextBody = isBlogArticle
+                      ? normalizeBlogBodyWithChartSlot(e.currentTarget.innerHTML, chartData)
+                      : sanitizeBlogBodyForStorage(e.currentTarget.innerHTML);
                     if (nextBody === content.body) {
                       return;
                     }
