@@ -46,6 +46,16 @@ type SourceRecord = {
   source_type: string;
 };
 
+const SUPPORTED_CHART_TYPES = new Set([
+  "bar",
+  "stackedBar",
+  "horizontalBar",
+  "areaLine",
+  "multiLine",
+  "line",
+  "pie",
+]);
+
 const lengthGuides: Record<ContentLength, string> = {
   Short: "Length: Concise, around 300-500 words.",
   Medium: "Length: Balanced, around 600-1000 words.",
@@ -1369,6 +1379,217 @@ const toValidMarker = (value: string, fallbackIndex: number) => {
 
 const normalizeInlineSpace = (value: string) => value.replace(/\s+/g, " ").trim();
 
+const truncateLabel = (value: string, max = 38) => {
+  const normalized = normalizeInlineSpace(value || "");
+  if (!normalized) return "";
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, Math.max(1, max - 1)).trim()}…`;
+};
+
+const parseChartNumber = (input: unknown) => {
+  if (typeof input === "number" && Number.isFinite(input)) {
+    return input;
+  }
+
+  if (typeof input !== "string") return null;
+  const normalized = input.trim();
+  if (!normalized) return null;
+  const numeric = normalized
+    .replace(/[$,%]/g, "")
+    .replace(/,/g, "")
+    .replace(/bps\b/gi, "")
+    .trim();
+  const value = Number.parseFloat(numeric);
+  if (!Number.isFinite(value)) return null;
+  return value;
+};
+
+const normalizeChartDataForRendering = (rawChartData: any) => {
+  if (!rawChartData || typeof rawChartData !== "object") return null;
+
+  const type = SUPPORTED_CHART_TYPES.has(String(rawChartData.type || ""))
+    ? String(rawChartData.type)
+    : "bar";
+  const rows = Array.isArray(rawChartData.data) ? rawChartData.data : [];
+
+  const normalizedRows = rows
+    .map((row: any) => {
+      if (!row || typeof row !== "object") return null;
+      const name = truncateLabel(String(row.name || ""));
+      if (!name) return null;
+
+      const value = parseChartNumber(row.value);
+      if (value === null) return null;
+
+      const entry: Record<string, string | number> = {
+        name,
+        value: Math.abs(value) >= 1000 ? Math.round(value) : Number(value.toFixed(3)),
+      };
+
+      const value2 = parseChartNumber(row.value2);
+      const value3 = parseChartNumber(row.value3);
+      if (value2 !== null) entry.value2 = Math.abs(value2) >= 1000 ? Math.round(value2) : Number(value2.toFixed(3));
+      if (value3 !== null) entry.value3 = Math.abs(value3) >= 1000 ? Math.round(value3) : Number(value3.toFixed(3));
+
+      return entry;
+    })
+    .filter((row): row is Record<string, string | number> => Boolean(row))
+    .slice(0, 12);
+
+  if (normalizedRows.length === 0) return null;
+
+  return {
+    ...rawChartData,
+    title: String(rawChartData.title || "Data Overview"),
+    subtitle: String(rawChartData.subtitle || "").trim() || undefined,
+    type,
+    dataLabel: String(rawChartData.dataLabel || "Value"),
+    dataLabel2: rawChartData.dataLabel2 ? String(rawChartData.dataLabel2) : undefined,
+    dataLabel3: rawChartData.dataLabel3 ? String(rawChartData.dataLabel3) : undefined,
+    dataKey2: normalizedRows.some((row) => Number.isFinite(Number(row.value2))) ? "value2" : undefined,
+    dataKey3: normalizedRows.some((row) => Number.isFinite(Number(row.value3))) ? "value3" : undefined,
+    stackKeys: type === "stackedBar"
+      ? Array.isArray(rawChartData.stackKeys) && rawChartData.stackKeys.length > 0
+        ? rawChartData.stackKeys.map((key: unknown) => String(key))
+        : ["value", "value2", "value3"]
+      : undefined,
+    stackLabels: type === "stackedBar" && Array.isArray(rawChartData.stackLabels)
+      ? rawChartData.stackLabels.map((label: unknown) => String(label))
+      : undefined,
+    yAxisPercent: Boolean(rawChartData.yAxisPercent),
+    source: rawChartData.source ? String(rawChartData.source) : undefined,
+    data: normalizedRows,
+  };
+};
+
+const parseSignalNumber = (rawToken: string) => {
+  const token = rawToken.trim();
+  if (!token) return null;
+
+  const lower = token.toLowerCase();
+  const isPercent = /%|percent\b|basis points\b|\bbps\b/.test(lower);
+  const hasUnit = /[$]|%|percent\b|basis points\b|\bbps\b|million\b|billion\b|trillion\b|\bbn\b|\bm\b|\bk\b/.test(lower);
+  let multiplier = 1;
+
+  if (/\btrillion\b/.test(lower)) multiplier = 1_000_000_000_000;
+  else if (/\bbillion\b|\bbn\b/.test(lower)) multiplier = 1_000_000_000;
+  else if (/\bmillion\b/.test(lower)) multiplier = 1_000_000;
+  else if (/[\d.]\s*m\b/.test(lower)) multiplier = 1_000_000;
+  else if (/[\d.]\s*k\b/.test(lower)) multiplier = 1_000;
+
+  const numericToken = token
+    .replace(/[$,%]/g, "")
+    .replace(/,/g, "")
+    .replace(/percent\b/gi, "")
+    .replace(/basis points\b/gi, "")
+    .replace(/\bbps\b/gi, "")
+    .replace(/\btrillion\b|\bbillion\b|\bmillion\b|\bbn\b|\bm\b|\bk\b/gi, "")
+    .trim();
+  const baseValue = Number.parseFloat(numericToken);
+  if (!Number.isFinite(baseValue)) return null;
+
+  if (!hasUnit && baseValue >= 1900 && baseValue <= 2100) {
+    return null;
+  }
+
+  return {
+    value: baseValue * multiplier,
+    isPercent,
+  };
+};
+
+const buildGroundedChartFallback = (params: {
+  topic: string;
+  answerText: string;
+  citations: CitationRecord[];
+}) => {
+  if (!params.citations.length) return null;
+
+  const validMarkers = new Set(params.citations.map((citation) => citation.marker));
+  const lines = params.answerText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.startsWith("#"));
+  const numberRegex = /(?:\$|US\$)?\s*-?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:%|percent|basis points|bps|million|billion|trillion|bn|m|k))?/i;
+  const claimedPoints: { name: string; value: number; isPercent: boolean }[] = [];
+  const seenNames = new Set<string>();
+
+  for (const line of lines) {
+    const markers = (line.match(/\[\d+\]/g) || []).filter((marker) => validMarkers.has(marker));
+    if (markers.length === 0) continue;
+
+    const numberMatch = line.match(numberRegex);
+    if (!numberMatch) continue;
+
+    const parsed = parseSignalNumber(numberMatch[0]);
+    if (!parsed) continue;
+
+    const labelSeed = line
+      .replace(/\[\d+\]/g, "")
+      .replace(/\(source:[^)]+\)/gi, "")
+      .replace(/\*\*/g, "")
+      .replace(/[_`]/g, "")
+      .trim();
+    const name = truncateLabel(labelSeed, 34);
+    if (!name || seenNames.has(name)) continue;
+
+    seenNames.add(name);
+    claimedPoints.push({
+      name,
+      value: Math.abs(parsed.value) >= 1000 ? Math.round(parsed.value) : Number(parsed.value.toFixed(3)),
+      isPercent: parsed.isPercent,
+    });
+
+    if (claimedPoints.length >= 6) break;
+  }
+
+  if (claimedPoints.length >= 2) {
+    const percentShare = claimedPoints.filter((point) => point.isPercent).length / claimedPoints.length;
+    return normalizeChartDataForRendering({
+      title: `${truncateLabel(params.topic, 56)}: Key Cited Figures`,
+      subtitle: "Values extracted from cited claims in this article.",
+      type: claimedPoints.length >= 5 ? "horizontalBar" : "bar",
+      dataLabel: percentShare >= 0.6 ? "Percent" : "Value",
+      yAxisPercent: percentShare >= 0.6,
+      source: "Source: Derived from cited evidence included in this draft.",
+      data: claimedPoints.map((point) => ({ name: point.name, value: point.value })),
+    });
+  }
+
+  const sourceCounts = new Map<string, { title: string; count: number }>();
+  for (const citation of params.citations) {
+    const existing = sourceCounts.get(citation.source_id);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+    sourceCounts.set(citation.source_id, {
+      title: citation.title || citation.source_id,
+      count: 1,
+    });
+  }
+
+  const sourceRows = Array.from(sourceCounts.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6)
+    .map((row) => ({
+      name: truncateLabel(row.title, 34),
+      value: row.count,
+    }));
+
+  if (!sourceRows.length) return null;
+
+  return normalizeChartDataForRendering({
+    title: `${truncateLabel(params.topic, 56)}: Source Coverage`,
+    subtitle: "Number of grounded citations used from each source.",
+    type: "bar",
+    dataLabel: "Citation Count",
+    source: "Source: Grounded citation map for this draft.",
+    data: sourceRows,
+  });
+};
+
 const buildAuditableQuotedSpan = (candidate: string, chunk: RetrievedChunk) => {
   const chunkText = normalizeInlineSpace(chunk.chunk_text || "");
   const cleanCandidate = normalizeInlineSpace(candidate || "");
@@ -1561,7 +1782,7 @@ const parseGroundedDraftResponse = (params: {
   const normalized = normalizeAnswerCitationMarkers(answerText, hydratedCitations);
   const sources = buildSourcesFromCitations(normalized.citations);
   const sourceLimitations = String(parsed?.source_limitations || params.defaultLimitations || "").trim();
-  const chartData = parsed?.chart_data && typeof parsed.chart_data === "object" ? parsed.chart_data : null;
+  const chartData = normalizeChartDataForRendering(parsed?.chart_data);
 
   return {
     title,
@@ -2858,13 +3079,13 @@ IMPORTANT: Return ONLY the rewritten passage.
 
       let htmlBody: string;
       let finalTitle = title;
+      let chartData: any = groundedChartData;
 
       // Check if this is a blog — convert markdown to clean simple HTML (white bg, black text)
       if (isBlogType) {
         // Extract chart data before parsing
         const chartRegex = /<script[^>]*id=["']chart-data["'][^>]*>([\s\S]*?)<\/script>/i;
         const chartMatch = body.match(chartRegex);
-        let chartData = groundedChartData;
         let bodyForParsing = body;
         if (chartMatch && !groundedChartData) {
           try {
@@ -2872,6 +3093,14 @@ IMPORTANT: Return ONLY the rewritten passage.
             chartData = JSON.parse(jsonStr);
           } catch (_e) { /* ignore parse errors */ }
           bodyForParsing = body.replace(chartMatch[0], '').trim();
+        }
+        chartData = normalizeChartDataForRendering(chartData);
+        if (shouldGround && !chartData) {
+          chartData = buildGroundedChartFallback({
+            topic,
+            answerText: parsedGroundedBody,
+            citations: groundedCitations,
+          });
         }
 
         // Strip any leftover structured markers (---TITLE---, ---SECTION---, etc.)
@@ -2993,7 +3222,7 @@ IMPORTANT: Return ONLY the rewritten passage.
         sources: groundedSources,
         source_limitations: draftSourceLimitations,
         grounding_status: shouldGround ? draftGroundingStatus : "grounded",
-        chart_data: groundedChartData || null,
+        chart_data: chartData || null,
       };
     });
 
