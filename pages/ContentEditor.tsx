@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
 import { createRoot, Root } from 'react-dom/client';
 import { triggerContentGeneration, triggerReviewNotification, supabase } from '../services/supabaseClient';
-import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client } from '../types';
+import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client, CitationPayloadItem, CitationSourceItem } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
   Wand2,
@@ -83,6 +83,19 @@ type ImageProvider = 'gemini' | 'chatgpt';
 type InlineHighlight = ComplianceHighlight & {
   local_state?: 'saving' | 'error';
   local_error?: string | null;
+};
+
+type GroundedGenerationOption = {
+  id?: number;
+  title: string;
+  body: string;
+  disclaimers?: string;
+  chart_data?: any;
+  chartData?: any;
+  citations?: CitationPayloadItem[];
+  sources?: CitationSourceItem[];
+  source_limitations?: string;
+  grounding_status?: 'grounded' | 'limited' | 'ungrounded';
 };
 
 const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
@@ -278,7 +291,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       if (latestVersionError) throw latestVersionError;
       const loadedChartData = latestVersionData?.chart_data || null;
+      const loadedCitations = (latestVersionData?.citation_payload || []) as CitationPayloadItem[];
+      const loadedSources = (latestVersionData?.source_payload || []) as CitationSourceItem[];
       setChartData(loadedChartData);
+      setCitations(loadedCitations);
+      setSources(loadedSources);
+      setSourceLimitations(latestVersionData?.source_limitations || '');
+      setGroundingStatus((latestVersionData?.grounding_status as 'grounded' | 'limited' | 'ungrounded' | null) || null);
       setContent(
         latestVersionData
           ? {
@@ -361,6 +380,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [shortDuration, setShortDuration] = useState<1 | 2 | 3>(1);
   const [variationCount, setVariationCount] = useState<number>(1);
   const [chartData, setChartData] = useState<any | null>(null);
+  const [citations, setCitations] = useState<CitationPayloadItem[]>([]);
+  const [sources, setSources] = useState<CitationSourceItem[]>([]);
+  const [sourceLimitations, setSourceLimitations] = useState<string>('');
+  const [groundingStatus, setGroundingStatus] = useState<'grounded' | 'limited' | 'ungrounded' | null>(null);
+  const [activeCitation, setActiveCitation] = useState<CitationPayloadItem | null>(null);
+  const [sourceUrlsInput, setSourceUrlsInput] = useState('');
   const [generationStep, setGenerationStep] = useState(0);
   const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isVideoScript = contentType === 'video_script';
@@ -369,6 +394,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
   const [extensionStep, setExtensionStep] = useState(0);
   const extensionTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const parseSourceUrls = (rawValue: string) =>
+    rawValue
+      .split('\n')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.startsWith('http://') || entry.startsWith('https://'))
+      .slice(0, 6);
+
+  const openCitationByMarker = useCallback((marker: string | null | undefined) => {
+    if (!marker) return;
+    const match = citations.find((citation) => citation.marker === marker);
+    if (match) {
+      setActiveCitation(match);
+    }
+  }, [citations]);
 
   const sanitizeBlogBodyForStorage = useCallback((html: string) => {
     if (!html || html.includes('<!DOCTYPE html>')) return html;
@@ -625,6 +665,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     body: string;
     disclaimers?: string;
     chart_data?: any;
+    citation_payload?: CitationPayloadItem[];
+    source_payload?: CitationSourceItem[];
+    source_limitations?: string;
+    grounding_status?: 'grounded' | 'limited' | 'ungrounded' | null;
   }) => {
     const sanitizeNoEmDashes = (input: string | null | undefined): string => {
       if (!input) return '';
@@ -650,6 +694,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         body: sanitizedBody,
         disclaimers: sanitizedDisclaimers || null,
         chart_data: payload.chart_data ?? null,
+        citation_payload: payload.citation_payload ?? [],
+        source_payload: payload.source_payload ?? [],
+        source_limitations: payload.source_limitations ?? null,
+        grounding_status: payload.grounding_status ?? null,
       })
       .select('*')
       .single();
@@ -691,6 +739,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       body: latestBody,
       disclaimers: content.disclaimers,
       chart_data: chartData,
+      citation_payload: citations,
+      source_payload: sources,
+      source_limitations: sourceLimitations,
+      grounding_status: groundingStatus,
     });
 
     setContent(savedVersion);
@@ -812,6 +864,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       finalInstructions += " Use a two-column script format (Visual | Audio).";
     }
     finalInstructions += ` ${NO_EM_DASH_INSTRUCTION}`;
+    const selectedSourceUrls = parseSourceUrls(sourceUrlsInput);
 
     try {
       const currentRequestId = await ensureRequestId();
@@ -825,6 +878,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           instructions: finalInstructions || 'Generate a high-quality financial illustration.',
           provider: imageProvider,
           count: variationCount,
+          orgId: profile.org_id,
+          requestId: currentRequestId,
+          sourceUrls: selectedSourceUrls,
         });
 
         // Always create/reset content to image-only (clear any previous text body)
@@ -834,7 +890,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           body: '',
           disclaimers: imageResponse.data?.disclaimers || '',
           chart_data: null,
+          citation_payload: [],
+          source_payload: [],
+          source_limitations: '',
+          grounding_status: null,
         });
+        setCitations([]);
+        setSources([]);
+        setSourceLimitations('');
+        setGroundingStatus(null);
         setContent(placeholderVersion);
 
         if (imageResponse.data && imageResponse.data.images && imageResponse.data.images.length > 1) {
@@ -849,7 +913,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             body: imgHtml,
             disclaimers: imageResponse.data.disclaimers || '',
             chart_data: null,
+            citation_payload: [],
+            source_payload: [],
+            source_limitations: '',
+            grounding_status: null,
           });
+          setCitations([]);
+          setSources([]);
+          setSourceLimitations('');
+          setGroundingStatus(null);
           setContent(savedVersion);
         }
       } else {
@@ -867,6 +939,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               provider: textProvider,
               contentLength,
               count: 1,
+              orgId: profile.org_id,
+              requestId: currentRequestId,
+              sourceUrls: selectedSourceUrls,
               ...(isVideoScript ? { videoDuration: contentLength === 'Short' ? shortDuration : undefined } : {}),
             }).catch(e => ({ error: true, message: e.message }))
           );
@@ -884,6 +959,11 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               title: successfulResults[0].data.title || successfulResults[0].data.options?.[0]?.title,
               body: successfulResults[0].data.body || successfulResults[0].data.options?.[0]?.body,
               disclaimers: successfulResults[0].data.disclaimers || successfulResults[0].data.options?.[0]?.disclaimers,
+              citations: successfulResults[0].data.citations || successfulResults[0].data.options?.[0]?.citations || [],
+              sources: successfulResults[0].data.sources || successfulResults[0].data.options?.[0]?.sources || [],
+              source_limitations: successfulResults[0].data.source_limitations || successfulResults[0].data.options?.[0]?.source_limitations || '',
+              grounding_status: successfulResults[0].data.grounding_status || successfulResults[0].data.options?.[0]?.grounding_status || null,
+              chart_data: successfulResults[0].data.chart_data || successfulResults[0].data.options?.[0]?.chart_data || null,
               options: successfulResults.map((r: any, idx: number) => ({
                 ...(r.data.options ? r.data.options[0] : r.data),
                 id: idx
@@ -899,6 +979,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             provider: textProvider,
             contentLength,
             count: variationCount,
+            orgId: profile.org_id,
+            requestId: currentRequestId,
+            sourceUrls: selectedSourceUrls,
             ...(isVideoScript ? { videoDuration: contentLength === 'Short' ? shortDuration : undefined } : {}),
           });
         }
@@ -909,7 +992,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           // Process options for chart data
           const processedOptions = generateResponse.data.options.map((opt: any) => {
             const { body, chartData } = extractChartData(opt.body);
-            return { ...opt, body, chartData };
+            return { ...opt, body, chartData: chartData ?? opt.chart_data ?? null };
           });
 
           setGeneratedTextOptions(processedOptions);
@@ -917,6 +1000,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
           const firstOption = processedOptions[0];
           setChartData(firstOption.chartData ?? null);
+          setCitations((firstOption.citations || []) as CitationPayloadItem[]);
+          setSources((firstOption.sources || []) as CitationSourceItem[]);
+          setSourceLimitations(firstOption.source_limitations || '');
+          setGroundingStatus(firstOption.grounding_status || null);
 
           savedVersion = await createContentVersion(currentRequestId, {
             generated_by: 'ai',
@@ -924,18 +1011,30 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             body: isBlogArticle ? ensureBlogChartSlot(firstOption.body, firstOption.chartData) : firstOption.body,
             disclaimers: firstOption.disclaimers,
             chart_data: firstOption.chartData ?? null,
+            citation_payload: firstOption.citations || [],
+            source_payload: firstOption.sources || [],
+            source_limitations: firstOption.source_limitations || '',
+            grounding_status: firstOption.grounding_status || null,
           });
           setContent(savedVersion);
         } else if (generateResponse.data) {
           const { body: cleanedBody, chartData: parsedChartData } = extractChartData(generateResponse.data.body);
-          setChartData(parsedChartData ?? null);
+          setChartData(parsedChartData ?? generateResponse.data.chart_data ?? null);
+          setCitations((generateResponse.data.citations || []) as CitationPayloadItem[]);
+          setSources((generateResponse.data.sources || []) as CitationSourceItem[]);
+          setSourceLimitations(generateResponse.data.source_limitations || '');
+          setGroundingStatus(generateResponse.data.grounding_status || null);
 
           savedVersion = await createContentVersion(currentRequestId, {
             generated_by: 'ai',
             title: generateResponse.data.title,
-            body: isBlogArticle ? ensureBlogChartSlot(cleanedBody, parsedChartData) : cleanedBody,
+            body: isBlogArticle ? ensureBlogChartSlot(cleanedBody, parsedChartData ?? generateResponse.data.chart_data ?? null) : cleanedBody,
             disclaimers: generateResponse.data.disclaimers,
-            chart_data: parsedChartData ?? null,
+            chart_data: parsedChartData ?? generateResponse.data.chart_data ?? null,
+            citation_payload: generateResponse.data.citations || [],
+            source_payload: generateResponse.data.sources || [],
+            source_limitations: generateResponse.data.source_limitations || '',
+            grounding_status: generateResponse.data.grounding_status || null,
           });
           setContent(savedVersion);
         }
@@ -950,6 +1049,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               provider: imageProvider,
               currentContent: savedVersion.body,
               count: variationCount,
+              orgId: profile.org_id,
+              requestId: currentRequestId,
+              sourceUrls: selectedSourceUrls,
             });
 
             if (imageResponse.data && imageResponse.data.images && imageResponse.data.images.length > 1) {
@@ -966,6 +1068,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                 body: newBody,
                 disclaimers: savedVersion.disclaimers,
                 chart_data: chartData || (savedVersion as any).chart_data || null,
+                citation_payload: citations,
+                source_payload: sources,
+                source_limitations: sourceLimitations,
+                grounding_status: groundingStatus,
               });
               setContent(updatedVersion);
             }
@@ -989,6 +1095,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     if (!requestId) return;
     try {
       setChartData(option.chartData ?? null);
+      setCitations((option.citations || []) as CitationPayloadItem[]);
+      setSources((option.sources || []) as CitationSourceItem[]);
+      setSourceLimitations(option.source_limitations || '');
+      setGroundingStatus(option.grounding_status || null);
 
       const savedVersion = await createContentVersion(requestId, {
         generated_by: 'ai',
@@ -996,6 +1106,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         body: isBlogArticle ? ensureBlogChartSlot(option.body, option.chartData ?? null) : option.body,
         disclaimers: option.disclaimers,
         chart_data: option.chartData ?? null,
+        citation_payload: option.citations || [],
+        source_payload: option.sources || [],
+        source_limitations: option.source_limitations || '',
+        grounding_status: option.grounding_status || null,
       });
       setContent(savedVersion);
       setShowTextSelection(false);
@@ -1020,6 +1134,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         provider: imageProvider,
         currentContent: content.body,
         count: variationCount,
+        orgId: profile?.org_id,
+        requestId: requestId || undefined,
+        sourceUrls: parseSourceUrls(sourceUrlsInput),
       });
 
       if (imageResponse.data && imageResponse.data.images && imageResponse.data.images.length > 1) {
@@ -1045,6 +1162,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
     try {
       const effectiveChartData = chartData ?? (content as any).chart_data ?? null;
+      const effectiveCitations = citations.length > 0 ? citations : ((content as any).citation_payload || []);
+      const effectiveSources = sources.length > 0 ? sources : ((content as any).source_payload || []);
+      const effectiveSourceLimitations = sourceLimitations || (content as any).source_limitations || '';
+      const effectiveGroundingStatus = groundingStatus || (content as any).grounding_status || null;
       let newBody = content.body;
       if (!newBody || newBody.trim() === '') {
         // Image-only mode: just use the image HTML
@@ -1061,6 +1182,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         body: isBlogArticle ? insertInlineImageIntoBlogBody(content.body, selectedImage.html, effectiveChartData) : newBody,
         disclaimers: content.disclaimers,
         chart_data: effectiveChartData,
+        citation_payload: effectiveCitations,
+        source_payload: effectiveSources,
+        source_limitations: effectiveSourceLimitations,
+        grounding_status: effectiveGroundingStatus,
       });
 
       setContent(savedVersion);
@@ -1120,7 +1245,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         provider: textProvider,
         contentLength,
         action: 'extend',
-        currentContent: currentBodyText
+        currentContent: currentBodyText,
+        orgId: profile?.org_id,
+        requestId: requestId || undefined,
+        sourceUrls: parseSourceUrls(sourceUrlsInput),
       });
 
       setExtensionStep(EXTENSION_STEPS.length);
@@ -1137,6 +1265,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           body: isBlogArticle ? ensureBlogChartSlot(response.data.body || content.body, chartData) : (response.data.body || content.body),
           disclaimers: content.disclaimers,
           chart_data: chartData,
+          citation_payload: citations,
+          source_payload: sources,
+          source_limitations: sourceLimitations,
+          grounding_status: groundingStatus,
         });
 
         const highlightedBody = handleHighlightAnimation(previousBody, savedVersion.body);
@@ -2073,6 +2205,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         body: cleanedHtml,
         disclaimers: currentContent.disclaimers,
         chart_data: chartData,
+        citation_payload: citations,
+        source_payload: sources,
+        source_limitations: sourceLimitations,
+        grounding_status: groundingStatus,
       });
 
       const scrollingElement = frameDocument.scrollingElement || frameDocument.documentElement || frameDocument.body;
@@ -2222,6 +2358,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           currentContent: fallbackText,
           rewriteMode: mode,
           complianceNote: complianceNote || undefined,
+          orgId: profile?.org_id,
+          requestId: latestRequestIdRef.current || undefined,
+          sourceUrls: parseSourceUrls(sourceUrlsInput),
         });
 
         const rawRewrite = response?.data?.body || response?.data?.title || fallbackText;
@@ -2275,6 +2414,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           action: 'rewrite',
           currentContent: fallbackText,
           rewriteMode: 'rewrite',
+          orgId: profile?.org_id,
+          requestId: latestRequestIdRef.current || undefined,
+          sourceUrls: parseSourceUrls(sourceUrlsInput),
         });
 
         const rawRewrite = response?.data?.body || response?.data?.title || fallbackText;
@@ -3400,6 +3542,20 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     />
                   </div>
 
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Approved Source URLs (Optional)</label>
+                    <textarea
+                      className="w-full p-3 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all h-24 resize-none"
+                      placeholder="One URL per line. Only official sources will be used."
+                      value={sourceUrlsInput}
+                      onChange={(e) => setSourceUrlsInput(e.target.value)}
+                      disabled={isApprovedLocked || (status !== ContentStatus.DRAFT && status !== ContentStatus.CHANGES_REQUESTED && status !== ContentStatus.APPROVED)}
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Retrieval uses stored chunks plus these official URLs. Unsupported pages are skipped.
+                    </p>
+                  </div>
+
                   {(status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED) && (
                     <div className="space-y-3">
                       {(generationMode === 'text' || generationMode === 'both') && (
@@ -3887,6 +4043,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   contentEditable
                   suppressContentEditableWarning
                   dangerouslySetInnerHTML={{ __html: content.body }}
+                  onClick={(event) => {
+                    const target = event.target as HTMLElement | null;
+                    const markerNode = target?.closest?.('[data-cf-citation-marker]') as HTMLElement | null;
+                    const marker = markerNode?.getAttribute('data-cf-citation-marker');
+                    if (!marker) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openCitationByMarker(marker);
+                  }}
                   onBlur={(e) => {
                     const nextFocused = e.relatedTarget as HTMLElement | null;
                     if (nextFocused?.closest('#cfIframePill')) {
@@ -3940,6 +4105,68 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                 )}
 
                 {chartData && !content.body.includes('data-cf-chart-slot="true"') && renderChartCard(chartData)}
+
+                {(groundingStatus || sourceLimitations) && (
+                  <div className="shrink-0 mt-10 pt-6 border-t border-slate-100">
+                    <div className={`rounded-xl border px-4 py-3 text-sm ${groundingStatus === 'grounded'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : groundingStatus === 'limited'
+                        ? 'bg-amber-50 border-amber-200 text-amber-800'
+                        : 'bg-red-50 border-red-200 text-red-700'
+                      }`}>
+                      <p className="font-semibold">
+                        {groundingStatus === 'grounded'
+                          ? 'Grounded citations attached'
+                          : groundingStatus === 'limited'
+                            ? 'Limited grounding confidence'
+                            : 'Ungrounded response'}
+                      </p>
+                      {sourceLimitations && <p className="mt-1">{sourceLimitations}</p>}
+                    </div>
+                  </div>
+                )}
+
+                {citations.length > 0 && (
+                  <div className="shrink-0 mt-10 pt-6 border-t border-slate-100">
+                    <h5 className="text-xs font-semibold uppercase text-slate-400 mb-3">Citations</h5>
+                    <div className="space-y-2">
+                      {citations.map((citation) => (
+                        <button
+                          key={`${citation.marker}-${citation.source_id}-${citation.chunk_index}`}
+                          onClick={() => setActiveCitation(citation)}
+                          className="w-full text-left bg-white border border-slate-200 rounded-lg px-3 py-2 hover:border-primary-300 hover:bg-primary-50/40 transition-colors"
+                        >
+                          <p className="text-sm font-semibold text-slate-800">{citation.marker} {citation.title}</p>
+                          <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{citation.quoted_span}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {sources.length > 0 && (
+                  <div className="shrink-0 mt-10 pt-6 border-t border-slate-100">
+                    <h5 className="text-xs font-semibold uppercase text-slate-400 mb-3">Sources</h5>
+                    <div className="space-y-2">
+                      {sources.map((source) => (
+                        <div key={source.source_id} className="bg-white border border-slate-200 rounded-lg px-3 py-2">
+                          <p className="text-sm font-semibold text-slate-800">{source.title}</p>
+                          <p className="text-xs text-slate-500">{source.source_type}</p>
+                          {source.url && (
+                            <a
+                              href={source.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs text-primary-600 hover:text-primary-700 underline break-all"
+                            >
+                              {source.url}
+                            </a>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Live Extension Progress Overlay */}
@@ -4064,6 +4291,46 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   {isGeneratingImage ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                   Generate New Variations
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeCitation && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full overflow-hidden animate-in zoom-in-95 duration-300">
+              <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-display font-semibold text-slate-900">{activeCitation.marker} Citation Detail</h3>
+                  <p className="text-sm text-slate-500">{activeCitation.title}</p>
+                </div>
+                <button
+                  onClick={() => setActiveCitation(null)}
+                  className="p-2 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="p-5 space-y-3">
+                {activeCitation.url && (
+                  <a
+                    href={activeCitation.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sm text-primary-600 hover:text-primary-700 underline break-all"
+                  >
+                    {activeCitation.url}
+                  </a>
+                )}
+                <p className="text-sm text-slate-600">
+                  {activeCitation.page ? `Page: ${activeCitation.page}` : 'Page: n/a'}
+                  {' · '}
+                  {activeCitation.section ? `Section: ${activeCitation.section}` : 'Section: n/a'}
+                </p>
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Supporting Excerpt</p>
+                  <p className="text-sm text-slate-700 leading-relaxed">{activeCitation.quoted_span}</p>
+                </div>
               </div>
             </div>
           </div>

@@ -97,7 +97,33 @@ export interface ContentVersion {
   disclaimers?: string;
   compliance_notes?: string;
   chart_data?: any;
+  citation_payload?: CitationPayloadItem[] | null;
+  source_payload?: CitationSourceItem[] | null;
+  source_limitations?: string | null;
+  grounding_status?: 'grounded' | 'limited' | 'ungrounded' | null;
   created_at: string;
+}
+
+export interface CitationPayloadItem {
+  marker: string;
+  source_id: string;
+  title: string;
+  url?: string | null;
+  page?: number | null;
+  section?: string | null;
+  quoted_span: string;
+  chunk_index: number;
+  source_type: string;
+  document_name?: string | null;
+  published_date?: string | null;
+  authority_score?: number | null;
+}
+
+export interface CitationSourceItem {
+  source_id: string;
+  title: string;
+  url?: string | null;
+  source_type: string;
 }
 
 export interface ComplianceReview {

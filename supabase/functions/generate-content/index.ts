@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.3";
 import { corsHeaders } from "../_shared/cors.ts";
 
 type Provider = "claude" | "kimi" | "gemini" | "chatgpt";
@@ -6,6 +7,44 @@ type ImageProvider = "gemini" | "chatgpt";
 type ContentLength = "Short" | "Medium" | "Long";
 type Action = "generate" | "extend" | "rewrite";
 type RewriteMode = "rewrite" | "shorten" | "expand" | "fix_compliance";
+
+type RetrievedChunk = {
+  id: string;
+  source_id: string;
+  title: string;
+  source_type: string;
+  canonical_url?: string | null;
+  document_name?: string | null;
+  page_number?: number | null;
+  section_heading?: string | null;
+  published_date?: string | null;
+  chunk_text: string;
+  chunk_index: number;
+  authority_score?: number | null;
+  retrieval_score: number;
+};
+
+type CitationRecord = {
+  marker: string;
+  source_id: string;
+  title: string;
+  url?: string | null;
+  page?: number | null;
+  section?: string | null;
+  quoted_span: string;
+  chunk_index: number;
+  source_type: string;
+  document_name?: string | null;
+  published_date?: string | null;
+  authority_score?: number | null;
+};
+
+type SourceRecord = {
+  source_id: string;
+  title: string;
+  url?: string | null;
+  source_type: string;
+};
 
 const lengthGuides: Record<ContentLength, string> = {
   Short: "Length: Concise, around 300-500 words.",
@@ -61,6 +100,12 @@ Rules:
 - Use **bold** for emphasis within paragraphs.
 - Write in a flowing, human narrative. No AI-isms (avoid "In conclusion", "Delve", "Tapestry").
 - Structure the article so it reads naturally with an opening section, then an interior visual, then more body copy, then a mid-article chart, then closing body text.
+- Any factual claim, statistic, return reference, market observation, tax statement, legal statement, or regulatory statement must include an inline citation in plain text, such as "(Source: Federal Reserve, 2025)".
+- End every blog with a final "## Sources" section that lists every cited source actually used in the article.
+- If you include a chart JSON block, the "## Sources" section must appear immediately before the chart JSON block so it remains the last section of the readable article.
+- In the "## Sources" section, put each source in its own paragraph and use markdown links when possible, for example: [Federal Reserve - Beige Book](https://www.federalreserve.gov/monetarypolicy/beigebook.htm)
+- Prefer primary and authoritative sources such as the Federal Reserve, SEC, FINRA, IRS, BLS, BEA, Treasury, Census, OECD, IMF, World Bank, company filings, and major fund or index providers.
+- If you cannot support a claim with a reputable source, remove the claim.
 - DO NOT use bullet points with dashes/hyphens in the article body.
 - DO NOT include disclaimers, stats blocks, or legal text.
 - DO NOT include category labels, read time, or any metadata.
@@ -100,6 +145,542 @@ const escapeHtml = (value: string) =>
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 
+const formatInlineMarkdown = (text: string) =>
+  escapeHtml(text)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:underline;">$1</a>')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/\[(\d+)\]/g, '<a href="#" data-cf-citation-marker="[$1]" style="color:#1d4ed8;text-decoration:none;font-weight:700;">[$1]</a>');
+
+const extractBlogSourcesMarkdown = (markdownBody: string) => {
+  const match = /(^|\n)(##\s+Sources\b[^\n]*)([\s\S]*)/i.exec(markdownBody);
+  if (!match || typeof match.index !== "number") {
+    return {
+      articleMarkdown: markdownBody.trim(),
+      sourcesMarkdown: "",
+    };
+  }
+
+  const headingStart = match.index + (match[1] ? match[1].length : 0);
+  const afterHeading = markdownBody.slice(headingStart + match[2].length);
+  const nextHeading = /\n##\s+/i.exec(afterHeading);
+  const sourcesEnd = nextHeading
+    ? headingStart + match[2].length + nextHeading.index
+    : markdownBody.length;
+
+  const sourcesMarkdown = markdownBody.slice(headingStart, sourcesEnd).trim();
+  const articleMarkdown = `${markdownBody.slice(0, headingStart).trim()}\n\n${markdownBody.slice(sourcesEnd).trim()}`
+    .trim()
+    .replace(/\n{3,}/g, "\n\n");
+
+  return { articleMarkdown, sourcesMarkdown };
+};
+
+const buildBlogSourcesSectionHtml = (params: {
+  markdownBody: string;
+  sourcesMarkdown: string;
+}) => {
+  let sourceEntries: string[] = [];
+
+  if (params.sourcesMarkdown) {
+    sourceEntries = params.sourcesMarkdown
+      .replace(/^##\s+Sources\b[^\n]*/i, "")
+      .trim()
+      .split(/\n\s*\n/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  if (sourceEntries.length === 0) {
+  const cited = new Set<string>();
+  const citationRegex = /\((?:Source|Sources)\s*:\s*([^)]+)\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = citationRegex.exec(params.markdownBody)) !== null) {
+    const text = (match[1] || '').trim();
+    if (text) cited.add(text);
+  }
+    sourceEntries = Array.from(cited);
+  }
+
+  const sourcesHtml = sourceEntries.length > 0
+    ? sourceEntries
+      .map((entry) => `<p style="margin-bottom: 14px; line-height: 1.8; color: #334155;">${formatInlineMarkdown(entry)}</p>`)
+      .join('\n')
+    : `<p style="margin-bottom: 14px; line-height: 1.8; color: #334155;">Sources were not provided. Please add a \\\"## Sources\\\" section listing the references used.</p>`;
+
+  return `<h2 style="font-size: 1.4rem; font-weight: 700; color: #0f172a; margin-top: 40px; margin-bottom: 16px;">Sources</h2>\n${sourcesHtml}`;
+};
+
+const SOURCE_MARKER_PREFIX = "src_";
+
+const normalizeText = (value: string) =>
+  (value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const extractQueryTerms = (query: string) => {
+  const stopWords = new Set([
+    "the", "and", "for", "with", "that", "this", "from", "into", "your", "about", "have", "has", "are", "was",
+    "were", "will", "should", "would", "could", "there", "their", "than", "then", "also", "when", "where", "which",
+    "what", "why", "how", "can", "not", "use", "using", "into", "over", "under", "after", "before", "between",
+  ]);
+
+  return normalizeText(query)
+    .split(" ")
+    .filter((term) => term.length >= 3 && !stopWords.has(term))
+    .slice(0, 24);
+};
+
+const officialDomainBoost = (url?: string | null) => {
+  if (!url) return 0;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (
+      host.endsWith(".gov") ||
+      host.endsWith(".mil") ||
+      host.includes("sec.gov") ||
+      host.includes("finra.org") ||
+      host.includes("irs.gov") ||
+      host.includes("federalreserve.gov") ||
+      host.includes("treasury.gov") ||
+      host.includes("bls.gov") ||
+      host.includes("bea.gov")
+    ) {
+      return 2.5;
+    }
+    if (host.endsWith(".edu")) return 1.2;
+    return 0;
+  } catch {
+    return 0;
+  }
+};
+
+const sourceTypeBoost = (sourceType: string) => {
+  const value = (sourceType || "").toLowerCase();
+  if (["regulatory", "government", "legal", "carrier_policy", "official_web", "filing", "statute"].includes(value)) {
+    return 2;
+  }
+  if (["pdf", "document", "uploaded_document", "stored_chunk"].includes(value)) {
+    return 1;
+  }
+  return 0;
+};
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const computeRetrievalScore = (chunk: Omit<RetrievedChunk, "retrieval_score">, queryTerms: string[]) => {
+  const haystack = normalizeText(`${chunk.title} ${chunk.section_heading || ""} ${chunk.chunk_text}`);
+  const titleHaystack = normalizeText(chunk.title || "");
+  const sectionHaystack = normalizeText(chunk.section_heading || "");
+
+  let lexical = 0;
+  for (const term of queryTerms) {
+    if (titleHaystack.includes(term)) lexical += 2.5;
+    if (sectionHaystack.includes(term)) lexical += 1.5;
+    if (haystack.includes(term)) lexical += 1;
+  }
+
+  const authority = typeof chunk.authority_score === "number"
+    ? clamp(chunk.authority_score / 25, 0, 2)
+    : 0;
+
+  return lexical + authority + sourceTypeBoost(chunk.source_type) + officialDomainBoost(chunk.canonical_url);
+};
+
+const dedupeChunks = (chunks: RetrievedChunk[]) => {
+  const seen = new Set<string>();
+  const deduped: RetrievedChunk[] = [];
+
+  for (const chunk of chunks) {
+    const normalizedBody = normalizeText(chunk.chunk_text).slice(0, 320);
+    const dedupeKey = `${chunk.source_id}:${chunk.chunk_index}:${normalizedBody}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    deduped.push(chunk);
+  }
+
+  return deduped;
+};
+
+const makeSourceIdFromUrl = (url: string, index: number) => {
+  const encoded = btoa(url).replace(/[^a-zA-Z0-9]/g, "").slice(0, 18);
+  return `${SOURCE_MARKER_PREFIX}web_${index}_${encoded || "source"}`;
+};
+
+const chunkLongText = (text: string, maxChars = 900, overlap = 120) => {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+  if (normalized.length <= maxChars) return [normalized];
+
+  const out: string[] = [];
+  let cursor = 0;
+  while (cursor < normalized.length) {
+    const end = Math.min(normalized.length, cursor + maxChars);
+    const slice = normalized.slice(cursor, end).trim();
+    if (slice) out.push(slice);
+    if (end >= normalized.length) break;
+    cursor = Math.max(0, end - overlap);
+  }
+  return out;
+};
+
+const fetchOfficialWebChunks = async (urls: string[], queryTerms: string[]) => {
+  const chunks: RetrievedChunk[] = [];
+  const safeUrls = urls
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .slice(0, 6);
+
+  for (let i = 0; i < safeUrls.length; i++) {
+    const url = safeUrls[i];
+    let hostname = "";
+    try {
+      hostname = new URL(url).hostname.toLowerCase();
+    } catch {
+      continue;
+    }
+
+    if (
+      !hostname.endsWith(".gov") &&
+      !hostname.endsWith(".mil") &&
+      !hostname.endsWith(".edu") &&
+      !hostname.includes("sec.gov") &&
+      !hostname.includes("finra.org") &&
+      !hostname.includes("irs.gov")
+    ) {
+      continue;
+    }
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "ComplyFlowGroundedRetriever/1.0",
+        },
+      });
+      if (!response.ok) continue;
+
+      const html = await response.text();
+      const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
+      const title = titleMatch?.[1]?.replace(/\s+/g, " ").trim() || hostname;
+      const text = html
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 28000);
+
+      const parts = chunkLongText(text, 900, 120);
+      const sourceId = makeSourceIdFromUrl(url, i);
+      for (let index = 0; index < parts.length; index++) {
+        const base: Omit<RetrievedChunk, "retrieval_score"> = {
+          id: `${sourceId}_${index}`,
+          source_id: sourceId,
+          title,
+          source_type: "official_web",
+          canonical_url: url,
+          document_name: null,
+          page_number: null,
+          section_heading: null,
+          published_date: null,
+          chunk_text: parts[index],
+          chunk_index: index,
+          authority_score: 0.8,
+        };
+
+        chunks.push({
+          ...base,
+          retrieval_score: computeRetrievalScore(base, queryTerms),
+        });
+      }
+    } catch {
+      // Ignore individual fetch failures and continue retrieval.
+    }
+  }
+
+  return chunks;
+};
+
+const retrieveGroundingChunks = async (params: {
+  supabaseAdmin: ReturnType<typeof createClient>;
+  orgId: string;
+  topic: string;
+  instructions: string;
+  currentContent: string;
+  sourceUrls?: string[];
+}) => {
+  const query = `${params.topic}\n${params.instructions || ""}\n${(params.currentContent || "").slice(0, 1200)}`.trim();
+  const queryTerms = extractQueryTerms(query);
+
+  const { data: storedChunks, error } = await params.supabaseAdmin
+    .from("citation_source_chunks")
+    .select("id, source_id, title, source_type, canonical_url, document_name, page_number, section_heading, published_date, chunk_text, chunk_index, authority_score")
+    .eq("org_id", params.orgId)
+    .eq("is_active", true)
+    .limit(450);
+
+  if (error) {
+    throw new Error(`Failed to retrieve source chunks: ${error.message}`);
+  }
+
+  const scoredStored = (storedChunks || []).map((row: any) => {
+    const base: Omit<RetrievedChunk, "retrieval_score"> = {
+      id: row.id,
+      source_id: row.source_id,
+      title: row.title,
+      source_type: row.source_type,
+      canonical_url: row.canonical_url,
+      document_name: row.document_name,
+      page_number: row.page_number,
+      section_heading: row.section_heading,
+      published_date: row.published_date,
+      chunk_text: row.chunk_text,
+      chunk_index: row.chunk_index,
+      authority_score: row.authority_score,
+    };
+    return {
+      ...base,
+      retrieval_score: computeRetrievalScore(base, queryTerms),
+    };
+  });
+
+  const webChunks = await fetchOfficialWebChunks(params.sourceUrls || [], queryTerms);
+  const merged = dedupeChunks([...scoredStored, ...webChunks])
+    .sort((a, b) => b.retrieval_score - a.retrieval_score);
+
+  const topChunks = merged.slice(0, 14);
+  const strongestScore = topChunks[0]?.retrieval_score || 0;
+  const hasStrongGrounding = topChunks.length >= 2 && strongestScore >= 2.5;
+
+  return {
+    query,
+    chunks: topChunks,
+    hasStrongGrounding,
+  };
+};
+
+const parseLooseJson = (raw: string) => {
+  let candidate = raw.trim();
+  if (candidate.startsWith("```")) {
+    candidate = candidate.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n```$/, "").trim();
+  }
+  const firstBrace = candidate.indexOf("{");
+  const lastBrace = candidate.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidate = candidate.slice(firstBrace, lastBrace + 1);
+  }
+  return JSON.parse(candidate);
+};
+
+const buildGroundingContextForPrompt = (chunks: RetrievedChunk[]) => {
+  return chunks.map((chunk, idx) => {
+    const marker = `${idx + 1}`.padStart(2, "0");
+    return [
+      `ChunkRef: ${marker}`,
+      `source_id: ${chunk.source_id}`,
+      `chunk_index: ${chunk.chunk_index}`,
+      `title: ${chunk.title}`,
+      `source_type: ${chunk.source_type}`,
+      `canonical_url: ${chunk.canonical_url || ""}`,
+      `document_name: ${chunk.document_name || ""}`,
+      `page_number: ${chunk.page_number ?? ""}`,
+      `section_heading: ${chunk.section_heading || ""}`,
+      `published_date: ${chunk.published_date || ""}`,
+      `authority_score: ${chunk.authority_score ?? ""}`,
+      `chunk_text: ${chunk.chunk_text}`,
+    ].join("\n");
+  }).join("\n\n---\n\n");
+};
+
+const toValidMarker = (value: string, fallbackIndex: number) => {
+  if (/^\[\d+\]$/.test(value || "")) return value;
+  return `[${fallbackIndex}]`;
+};
+
+const normalizeInlineSpace = (value: string) => value.replace(/\s+/g, " ").trim();
+
+const buildAuditableQuotedSpan = (candidate: string, chunk: RetrievedChunk) => {
+  const chunkText = normalizeInlineSpace(chunk.chunk_text || "");
+  const cleanCandidate = normalizeInlineSpace(candidate || "");
+
+  if (cleanCandidate) {
+    const normalizedCandidate = normalizeText(cleanCandidate);
+    const normalizedChunk = normalizeText(chunkText);
+    if (normalizedCandidate && normalizedChunk.includes(normalizedCandidate)) {
+      return cleanCandidate.slice(0, 380);
+    }
+  }
+
+  return chunkText.slice(0, 280);
+};
+
+const validateAndHydrateCitations = (params: {
+  rawCitations: any[];
+  retrievedChunks: RetrievedChunk[];
+}) => {
+  const chunkKeyMap = new Map<string, RetrievedChunk>();
+  params.retrievedChunks.forEach((chunk) => {
+    chunkKeyMap.set(`${chunk.source_id}::${chunk.chunk_index}`, chunk);
+  });
+
+  const seenMarkers = new Set<string>();
+  const citations: CitationRecord[] = [];
+
+  (params.rawCitations || []).forEach((raw, index) => {
+    const sourceId = String(raw?.source_id || "").trim();
+    const chunkIndex = Number.isFinite(Number(raw?.chunk_index)) ? Number(raw.chunk_index) : NaN;
+    if (!sourceId || Number.isNaN(chunkIndex)) return;
+
+    const chunk = chunkKeyMap.get(`${sourceId}::${chunkIndex}`);
+    if (!chunk) return;
+
+    const marker = toValidMarker(String(raw?.marker || ""), index + 1);
+    if (seenMarkers.has(marker)) return;
+    seenMarkers.add(marker);
+
+    const citation: CitationRecord = {
+      marker,
+      source_id: chunk.source_id,
+      title: chunk.title,
+      url: chunk.canonical_url || null,
+      page: chunk.page_number ?? null,
+      section: chunk.section_heading || null,
+      quoted_span: buildAuditableQuotedSpan(String(raw?.quoted_span || ""), chunk),
+      chunk_index: chunk.chunk_index,
+      source_type: chunk.source_type,
+      document_name: chunk.document_name || null,
+      published_date: chunk.published_date || null,
+      authority_score: chunk.authority_score ?? null,
+    };
+
+    citations.push(citation);
+  });
+
+  return citations;
+};
+
+const buildSourcesFromCitations = (citations: CitationRecord[]) => {
+  const map = new Map<string, SourceRecord>();
+  for (const citation of citations) {
+    if (!map.has(citation.source_id)) {
+      map.set(citation.source_id, {
+        source_id: citation.source_id,
+        title: citation.title,
+        url: citation.url || null,
+        source_type: citation.source_type,
+      });
+    }
+  }
+  return Array.from(map.values());
+};
+
+const normalizeAnswerCitationMarkers = (answerText: string, citations: CitationRecord[]) => {
+  if (!citations.length) {
+    return {
+      answerText: answerText.replace(/\[(\d+)\]/g, "").trim(),
+      citations,
+    };
+  }
+
+  const markerMap = new Map<string, string>();
+  const normalizedCitations = citations.map((citation, index) => {
+    const normalizedMarker = `[${index + 1}]`;
+    markerMap.set(citation.marker, normalizedMarker);
+    return { ...citation, marker: normalizedMarker };
+  });
+
+  let normalizedText = answerText;
+  for (const [originalMarker, normalizedMarker] of markerMap.entries()) {
+    if (originalMarker !== normalizedMarker) {
+      normalizedText = normalizedText.split(originalMarker).join(normalizedMarker);
+    }
+  }
+
+  const allowedMarkers = new Set(normalizedCitations.map((citation) => citation.marker));
+  normalizedText = normalizedText.replace(/\[(\d+)\]/g, (marker) => {
+    return allowedMarkers.has(marker) ? marker : "";
+  });
+
+  return {
+    answerText: normalizedText.trim(),
+    citations: normalizedCitations,
+  };
+};
+
+const appendGroundedSourcesToHtml = (params: {
+  htmlBody: string;
+  citations: CitationRecord[];
+  sources: SourceRecord[];
+  sourceLimitations: string;
+}) => {
+  const citationRows = params.citations.length > 0
+    ? params.citations.map((citation) => {
+      const locationParts = [
+        citation.page ? `p. ${citation.page}` : "",
+        citation.section ? `${citation.section}` : "",
+      ].filter(Boolean).join(" | ");
+      const secondary = locationParts || citation.url || citation.document_name || "No location metadata";
+
+      return `<p style="margin-bottom: 14px; line-height: 1.75; color: #334155;">
+<strong>${citation.marker}</strong> ${escapeHtml(citation.title)}${secondary ? ` — ${escapeHtml(secondary)}` : ""}<br/>
+<span style="color:#64748b;">${escapeHtml(citation.quoted_span)}</span>
+</p>`;
+    }).join("\n")
+    : `<p style="margin-bottom: 14px; line-height: 1.75; color: #334155;">I could not verify this from the available sources.</p>`;
+
+  const sourceRows = params.sources.length > 0
+    ? params.sources.map((source) => {
+      const link = source.url
+        ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:underline;">${escapeHtml(source.url)}</a>`
+        : "No URL available";
+      return `<p style="margin-bottom: 10px; line-height: 1.7; color: #334155;"><strong>${escapeHtml(source.title)}</strong> (${escapeHtml(source.source_type)})<br/>${link}</p>`;
+    }).join("\n")
+    : `<p style="margin-bottom: 10px; line-height: 1.7; color: #334155;">No verifiable sources were returned.</p>`;
+
+  const limitation = params.sourceLimitations
+    ? `<p style="margin-bottom: 14px; line-height: 1.75; color: #8b5e00;">${escapeHtml(params.sourceLimitations)}</p>`
+    : "";
+
+  return `${params.htmlBody}
+<h2 style="font-size: 1.4rem; font-weight: 700; color: #0f172a; margin-top: 42px; margin-bottom: 16px;">Citations</h2>
+${citationRows}
+<h2 style="font-size: 1.4rem; font-weight: 700; color: #0f172a; margin-top: 36px; margin-bottom: 16px;">Sources</h2>
+${sourceRows}
+${limitation}`;
+};
+
+const parseGroundedDraftResponse = (params: {
+  rawText: string;
+  retrievedChunks: RetrievedChunk[];
+  defaultLimitations: string;
+}) => {
+  const parsed = parseLooseJson(params.rawText);
+  const answerText = String(parsed?.answer_text || "").trim();
+  const title = String(parsed?.title || "").trim();
+  const rawCitations = Array.isArray(parsed?.citations) ? parsed.citations : [];
+  const hydratedCitations = validateAndHydrateCitations({
+    rawCitations,
+    retrievedChunks: params.retrievedChunks,
+  });
+  const normalized = normalizeAnswerCitationMarkers(answerText, hydratedCitations);
+  const sources = buildSourcesFromCitations(normalized.citations);
+  const sourceLimitations = String(parsed?.source_limitations || params.defaultLimitations || "").trim();
+  const chartData = parsed?.chart_data && typeof parsed.chart_data === "object" ? parsed.chart_data : null;
+
+  return {
+    title,
+    answerText: normalized.answerText,
+    citations: normalized.citations,
+    sources,
+    sourceLimitations,
+    chartData,
+    groundingStatus: normalized.citations.length > 0 ? "grounded" : "limited",
+  };
+};
+
 // ── LWM Blog HTML Template Builder ──
 function buildLwmBlogHtml(structured: {
   title: string;
@@ -118,7 +699,7 @@ function buildLwmBlogHtml(structured: {
   const dateStr = today.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).toUpperCase();
 
   // Convert markdown-like bold to HTML
-  const md = (text: string) => text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  const md = (text: string) => formatInlineMarkdown(text);
 
   // Build section HTML
   const sectionsHtml = structured.sections.map(s => {
@@ -864,6 +1445,9 @@ serve(async (req) => {
       complianceNote = "",
       count = 1,
       videoDuration,
+      orgId,
+      requestId,
+      sourceUrls = [],
     }: {
       topic: string;
       contentType: string;
@@ -876,10 +1460,15 @@ serve(async (req) => {
       complianceNote?: string;
       count?: number;
       videoDuration?: number;
+      orgId?: string;
+      requestId?: string;
+      sourceUrls?: string[];
     } = await req.json();
 
     const safeLength = (contentLength in lengthGuides ? contentLength : "Medium") as ContentLength;
     const lengthInstruction = lengthGuides[safeLength];
+    const normalizedOrgId = (orgId || "").trim();
+    const normalizedRequestId = (requestId || "").trim() || null;
 
     if (provider === "gemini" || provider === "chatgpt") {
       const imageProvider: ImageProvider = provider === "chatgpt" ? "chatgpt" : "gemini";
@@ -973,10 +1562,81 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
       );
     }
 
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+    if (!supabaseUrl || !supabaseServiceKey) {
+      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY secret.");
+    }
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
+
     const isBlogType = contentType && contentType.toLowerCase() === 'blog';
+    const shouldGround = isBlogType && action === "generate";
+    let retrievedChunks: RetrievedChunk[] = [];
+    let retrievalQuery = "";
+    let groundingStatus: "grounded" | "limited" | "ungrounded" = "ungrounded";
+    let sourceLimitations = "";
+
+    if (shouldGround) {
+      if (!normalizedOrgId) {
+        throw new Error("Missing orgId for grounded citation retrieval.");
+      }
+
+      const retrieval = await retrieveGroundingChunks({
+        supabaseAdmin,
+        orgId: normalizedOrgId,
+        topic,
+        instructions,
+        currentContent,
+        sourceUrls,
+      });
+
+      retrievedChunks = retrieval.chunks;
+      retrievalQuery = retrieval.query;
+      groundingStatus = retrieval.hasStrongGrounding ? "grounded" : (retrievedChunks.length > 0 ? "limited" : "ungrounded");
+      sourceLimitations = retrieval.hasStrongGrounding
+        ? ""
+        : "Retrieved evidence was limited or weak for this request.";
+
+      if (!retrieval.hasStrongGrounding) {
+        const failureMessage = "I could not verify this from the available sources.";
+        const payload = {
+          answer_text: failureMessage,
+          citations: [],
+          sources: [],
+          source_limitations: sourceLimitations || "No sufficiently strong grounding material was found.",
+          grounding_status: "ungrounded",
+          title: `Unverified: ${topic}`,
+          body: `<p>${failureMessage}</p><p style="color:#7c2d12;">${escapeHtml(sourceLimitations || "No sufficiently strong grounding material was found.")}</p>`,
+          disclaimers: "",
+        };
+
+        if (normalizedOrgId) {
+          await supabaseAdmin
+            .from("grounding_audit_logs")
+            .insert({
+              org_id: normalizedOrgId,
+              request_id: normalizedRequestId,
+              topic,
+              query_text: retrievalQuery,
+              provider,
+              used_chunks: [],
+              citations: [],
+              sources: [],
+              source_limitations: payload.source_limitations,
+              grounding_status: "ungrounded",
+            });
+        }
+
+        return new Response(
+          JSON.stringify({ data: payload }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+    }
+
     let systemPrompt = isBlogType ? legacyWealthBlogStyle : legacyWealthStyle;
     let userContent = isBlogType
-      ? `Write a premium blog article about: ${topic}.\n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}\n\nRemember: Write in clean markdown with # for title, ## for section headings, and regular paragraphs. Do NOT use ---MARKER--- tags.\n\nIf the topic involves data, trends, asset allocation, or comparisons, you MUST also append a JSON chart block at the very end of your response. Choose the most appropriate chart type from these options:\n\n1. "bar" — standard vertical bar chart (default, good for simple comparisons)\n2. "stackedBar" — stacked vertical bars (good for composition breakdowns like asset allocation). Requires stackKeys and stackLabels arrays.\n3. "horizontalBar" — horizontal bars (good for ranking/factor comparisons, each bar gets a unique color)\n4. "areaLine" — line with shaded area fill (good for trends over time, probability curves)\n5. "multiLine" — multiple lines with subtle area fills (good for glide paths, multi-series time data). Use dataKey2/dataKey3 for additional series.\n6. "line" — standard line chart (good for simple trends)\n7. "pie" — donut/pie chart\n\nFormat the JSON exactly like this:\n<script type="application/json" id="chart-data">\n{"title": "Chart Title", "subtitle": "One-line description of what data shows", "type": "bar", "dataLabel": "Series Name", "source": "Source: Research Group; Data Provider. Note about methodology.", "data": [{"name": "A", "value": 10}]}\n</script>\n\nStacked bar example: {"type": "stackedBar", "stackKeys": ["value", "value2", "value3"], "stackLabels": ["Equities", "Fixed Income", "Cash / Alts."], "data": [{"name": "Conservative", "value": 20, "value2": 65, "value3": 15}]}\nGrouped bar example: {"type": "bar", "dataKey2": "value2", "dataLabel": "Fund Return", "dataLabel2": "Investor Return", "yAxisPercent": true, "data": [{"name": "U.S. Equity", "value": 9.8, "value2": 7.9}]}\nMulti-line example: {"type": "multiLine", "dataKey2": "value2", "dataKey3": "value3", "dataLabel": "Equities (%)", "dataLabel2": "Fixed Income (%)", "dataLabel3": "Cash (%)", "data": [{"name": "Age 25", "value": 95, "value2": 4, "value3": 1}]}\nArea-line example: {"type": "areaLine", "dataLabel": "Historical Frequency (%)", "data": [{"name": "1 Year", "value": 29}]}`
+      ? `Write a premium blog article about: ${topic}.\n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}\n\nRemember: Write in clean markdown with # for title, ## for section headings, and regular paragraphs. Do NOT use ---MARKER--- tags.\n\nCitation Requirement: Every factual or numerical claim must include an inline citation in plain text like "(Source: Federal Reserve, 2025)". End the article with a final ## Sources section listing every cited source actually used. Put each source in its own paragraph, and use markdown links when possible. If you cannot support a claim with a credible source, remove the claim. If you include a chart JSON block, the ## Sources section must appear immediately before the chart JSON block.\n\nIf the topic involves data, trends, asset allocation, or comparisons, you MUST also append a JSON chart block at the very end of your response. Choose the most appropriate chart type from these options:\n\n1. "bar" — standard vertical bar chart (default, good for simple comparisons)\n2. "stackedBar" — stacked vertical bars (good for composition breakdowns like asset allocation). Requires stackKeys and stackLabels arrays.\n3. "horizontalBar" — horizontal bars (good for ranking/factor comparisons, each bar gets a unique color)\n4. "areaLine" — line with shaded area fill (good for trends over time, probability curves)\n5. "multiLine" — multiple lines with subtle area fills (good for glide paths, multi-series time data). Use dataKey2/dataKey3 for additional series.\n6. "line" — standard line chart (good for simple trends)\n7. "pie" — donut/pie chart\n\nFormat the JSON exactly like this:\n<script type="application/json" id="chart-data">\n{"title": "Chart Title", "subtitle": "One-line description of what data shows", "type": "bar", "dataLabel": "Series Name", "source": "Source: Research Group; Data Provider. Note about methodology.", "data": [{"name": "A", "value": 10}]}\n</script>\n\nStacked bar example: {"type": "stackedBar", "stackKeys": ["value", "value2", "value3"], "stackLabels": ["Equities", "Fixed Income", "Cash / Alts."], "data": [{"name": "Conservative", "value": 20, "value2": 65, "value3": 15}]}\nGrouped bar example: {"type": "bar", "dataKey2": "value2", "dataLabel": "Fund Return", "dataLabel2": "Investor Return", "yAxisPercent": true, "data": [{"name": "U.S. Equity", "value": 9.8, "value2": 7.9}]}\nMulti-line example: {"type": "multiLine", "dataKey2": "value2", "dataKey3": "value3", "dataLabel": "Equities (%)", "dataLabel2": "Fixed Income (%)", "dataLabel3": "Cash (%)", "data": [{"name": "Age 25", "value": 95, "value2": 4, "value3": 1}]}\nArea-line example: {"type": "areaLine", "dataLabel": "Historical Frequency (%)", "data": [{"name": "1 Year", "value": 29}]}`
       : `Write a ${contentType} about ${topic}. \n\nLength Requirement: ${lengthInstruction}\n\nSpecific Instructions: ${instructions}
 
 If the topic involves data, trends, asset allocation, or comparisons, you MUST append a JSON block to the very end of your response formatted exactly like this:
@@ -984,6 +1644,55 @@ If the topic involves data, trends, asset allocation, or comparisons, you MUST a
 {"title": "Chart Title", "type": "bar", "dataLabel": "Metric 1 (e.g. 2023 Yield %)", "dataKey2": "value2", "dataLabel2": "Metric 2 (optional, e.g. 2024 Yield %)", "data": [{"name": "Category A", "value": 10, "value2": 15}, {"name": "Category B", "value": 20, "value2": 25}]}
 </script>
 If comparing two sets of metrics across categories, include dataKey2, dataLabel2, and value2. Otherwise, omit them. Do not put this script block inside markdown formatting. The type can be 'bar', 'line', or 'pie'.`;
+
+    if (shouldGround) {
+      const retrievalContext = buildGroundingContextForPrompt(retrievedChunks);
+      systemPrompt = `${legacyWealthBlogStyle}
+
+Grounding policy (must follow):
+- Use ONLY retrieved chunk evidence provided by the user context.
+- Never cite, reference, or imply any source that is not in retrieved chunks.
+- If sources conflict, explicitly describe the conflict with citations on both sides.
+- If a statement is inference/synthesis, label that sentence with "(Inference)" and cite supporting chunks.
+- If evidence is incomplete, state that uncertainty briefly under "source_limitations".`;
+
+      userContent = `User request topic: ${topic}
+Length requirement: ${lengthInstruction}
+Additional user instructions: ${instructions || "None"}
+
+Retrieved chunks (approved evidence only):
+${retrievalContext}
+
+Return STRICT JSON with exactly these keys:
+{
+  "title": "string",
+  "answer_text": "markdown article with inline citation markers like [1], [2]",
+  "citations": [
+    {
+      "marker": "[1]",
+      "source_id": "src_...",
+      "chunk_index": 3,
+      "quoted_span": "short excerpt copied from the supporting chunk"
+    }
+  ],
+  "source_limitations": "short note when confidence is reduced; empty string when confidence is high",
+  "chart_data": {
+    "title": "Chart title",
+    "subtitle": "One-line description",
+    "type": "bar",
+    "dataLabel": "Series label",
+    "data": [{"name":"A","value":10}]
+  }
+}
+
+JSON constraints:
+- "citations" must only reference source_id + chunk_index pairs that exist in retrieved chunks.
+- Every factual compliance claim should include at least one citation marker.
+- Keep quoted_span short (max ~240 chars), and it must appear in the cited chunk.
+- If a chart is not needed, set "chart_data" to null.
+- Do not include Markdown code fences.
+- Do not output any text before or after the JSON.`;
+    }
 
     if (contentType && (contentType.toLowerCase() === "video script" || contentType.toLowerCase() === "video_script")) {
       systemPrompt = meritVideoStyle;
@@ -1128,9 +1837,50 @@ IMPORTANT: Return ONLY the rewritten passage.
         rawText = rawText.trim();
       }
 
-      const lines = rawText.split("\n");
-      let title = lines[0]?.replace(/^#\s*/, "").replace(/\*\*/g, "").trim() || `Generated Content: ${topic}`;
-      let body = lines.slice(1).join("\n").trim();
+      let parsedGroundedTitle = "";
+      let parsedGroundedBody = rawText;
+      let groundedCitations: CitationRecord[] = [];
+      let groundedSources: SourceRecord[] = [];
+      let draftSourceLimitations = sourceLimitations;
+      let draftGroundingStatus: "grounded" | "limited" | "ungrounded" = groundingStatus;
+      let groundedChartData: any = null;
+
+      if (shouldGround) {
+        try {
+          const grounded = parseGroundedDraftResponse({
+            rawText,
+            retrievedChunks,
+            defaultLimitations: sourceLimitations,
+          });
+          parsedGroundedTitle = grounded.title;
+          parsedGroundedBody = grounded.answerText;
+          groundedCitations = grounded.citations;
+          groundedSources = grounded.sources;
+          draftSourceLimitations = grounded.sourceLimitations;
+          draftGroundingStatus = grounded.groundingStatus;
+          groundedChartData = grounded.chartData;
+        } catch {
+          parsedGroundedTitle = `Unverified: ${topic}`;
+          parsedGroundedBody = "I could not verify this from the available sources.";
+          groundedCitations = [];
+          groundedSources = [];
+          draftSourceLimitations = "The writing output could not be parsed into a grounded citation response.";
+          draftGroundingStatus = "ungrounded";
+          groundedChartData = null;
+        }
+      }
+
+      const lines = (shouldGround ? parsedGroundedBody : rawText).split("\n");
+      let title = (shouldGround ? parsedGroundedTitle : "")
+        || lines[0]?.replace(/^#\s*/, "").replace(/\*\*/g, "").trim()
+        || `Generated Content: ${topic}`;
+      let body = shouldGround
+        ? parsedGroundedBody.trim()
+        : lines.slice(1).join("\n").trim();
+      if (shouldGround && !body) {
+        body = "I could not verify this from the available sources.";
+        draftGroundingStatus = "ungrounded";
+      }
       if (!title || title.length < 5) {
         // Fallback if title is missing or empty
         title = `Deep Dive: ${topic}`;
@@ -1144,9 +1894,9 @@ IMPORTANT: Return ONLY the rewritten passage.
         // Extract chart data before parsing
         const chartRegex = /<script[^>]*id=["']chart-data["'][^>]*>([\s\S]*?)<\/script>/i;
         const chartMatch = body.match(chartRegex);
-        let chartData = null;
+        let chartData = groundedChartData;
         let bodyForParsing = body;
-        if (chartMatch) {
+        if (chartMatch && !groundedChartData) {
           try {
             let jsonStr = chartMatch[1].trim().replace(/^```(json)?\s*/i, '').replace(/```$/, '').trim();
             chartData = JSON.parse(jsonStr);
@@ -1157,17 +1907,19 @@ IMPORTANT: Return ONLY the rewritten passage.
         // Strip any leftover structured markers (---TITLE---, ---SECTION---, etc.)
         let cleanText = bodyForParsing;
         cleanText = cleanText.replace(/---[A-Z_]+---/g, '').trim();
+        const { articleMarkdown, sourcesMarkdown } = extractBlogSourcesMarkdown(cleanText);
+        const markdownForBody = articleMarkdown;
 
         // Process line by line to properly detect headers even with single line breaks
         const outputParts: string[] = [];
-        const allLines = cleanText.split('\n');
+        const allLines = markdownForBody.split('\n');
         let currentParagraph: string[] = [];
 
         const flushParagraph = () => {
           if (currentParagraph.length > 0) {
             const text = currentParagraph.join(' ').trim();
             if (text) {
-              outputParts.push(`<p style="margin-bottom: 20px; line-height: 1.8; color: #334155;">${text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.*?)\*/g, '<em>$1</em>')}</p>`);
+              outputParts.push(`<p style="margin-bottom: 20px; line-height: 1.8; color: #334155;">${formatInlineMarkdown(text)}</p>`);
             }
             currentParagraph = [];
           }
@@ -1214,6 +1966,18 @@ IMPORTANT: Return ONLY the rewritten passage.
         // Prepend the title as a big bold heading at the very top of the body
         htmlBody = `<h1 style="font-size: 2.2rem; font-weight: 800; color: #0f172a; margin-top: 0; margin-bottom: 20px; line-height: 1.15; letter-spacing: -0.02em;">${finalTitle}</h1>\n` + htmlBody;
 
+        if (shouldGround) {
+          htmlBody = appendGroundedSourcesToHtml({
+            htmlBody,
+            citations: groundedCitations,
+            sources: groundedSources,
+            sourceLimitations: draftSourceLimitations,
+          });
+        } else {
+          // Always render the sources section as the final visible section of the article.
+          htmlBody += `\n${buildBlogSourcesSectionHtml({ markdownBody: cleanText, sourcesMarkdown })}`;
+        }
+
         // Append chart data as a script tag so the frontend can extract it
         if (chartData) {
           htmlBody += `\n<script type="application/json" id="chart-data">\n${JSON.stringify(chartData)}\n</script>`;
@@ -1233,7 +1997,7 @@ IMPORTANT: Return ONLY the rewritten passage.
             return `
               <div style="margin-bottom: 24px; padding: 12px; background: #f8fafc; border-radius: 8px; border-left: 4px solid #2563eb;">
                 <div style="color: #2563eb; font-weight: 700; margin-bottom: 4px; font-size: 14px;">${timestamp}</div>
-                <p style="margin: 0; color: #334155; line-height: 1.6;">${content.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>
+                <p style="margin: 0; color: #334155; line-height: 1.6;">${formatInlineMarkdown(content)}</p>
               </div>
             `;
           }
@@ -1241,7 +2005,7 @@ IMPORTANT: Return ONLY the rewritten passage.
           if (trimmed.startsWith("###")) return `<h3 style="margin-top: 32px; margin-bottom: 16px; font-weight: 700;">${trimmed.replace(/^###\s*/, "")}</h3>`;
           if (trimmed.startsWith("##")) return `<h2 style="margin-top: 40px; margin-bottom: 20px; font-weight: 700;">${trimmed.replace(/^##\s*/, "")}</h2>`;
           if (trimmed.startsWith("#")) return `<h1 style="margin-top: 48px; margin-bottom: 24px; font-weight: 800;">${trimmed.replace(/^#\s*/, "")}</h1>`;
-          return `<p style="margin-bottom: 24px;">${trimmed.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`;
+          return `<p style="margin-bottom: 24px;">${formatInlineMarkdown(trimmed)}</p>`;
         }).join("\n");
       }
 
@@ -1250,6 +2014,12 @@ IMPORTANT: Return ONLY the rewritten passage.
         title: finalTitle,
         body: htmlBody || "<p>No content generated.</p>",
         disclaimers: "",
+        answer_text: shouldGround ? parsedGroundedBody : body,
+        citations: groundedCitations,
+        sources: groundedSources,
+        source_limitations: draftSourceLimitations,
+        grounding_status: shouldGround ? draftGroundingStatus : "grounded",
+        chart_data: groundedChartData || null,
       };
     });
 
@@ -1267,6 +2037,43 @@ IMPORTANT: Return ONLY the rewritten passage.
       );
     }
 
+    if (shouldGround && normalizedOrgId) {
+      const firstResult = formattedResults[0];
+      const usedKeys = new Set(
+        (firstResult.citations || []).map((citation: CitationRecord) => `${citation.source_id}::${citation.chunk_index}`),
+      );
+      const usedChunks = retrievedChunks
+        .filter((chunk) => usedKeys.has(`${chunk.source_id}::${chunk.chunk_index}`))
+        .map((chunk) => ({
+          source_id: chunk.source_id,
+          title: chunk.title,
+          source_type: chunk.source_type,
+          canonical_url: chunk.canonical_url || null,
+          document_name: chunk.document_name || null,
+          page_number: chunk.page_number ?? null,
+          section_heading: chunk.section_heading || null,
+          published_date: chunk.published_date || null,
+          chunk_text: chunk.chunk_text,
+          chunk_index: chunk.chunk_index,
+          authority_score: chunk.authority_score ?? null,
+        }));
+
+      await supabaseAdmin
+        .from("grounding_audit_logs")
+        .insert({
+          org_id: normalizedOrgId,
+          request_id: normalizedRequestId,
+          topic,
+          query_text: retrievalQuery,
+          provider,
+          used_chunks: usedChunks,
+          citations: firstResult.citations || [],
+          sources: firstResult.sources || [],
+          source_limitations: firstResult.source_limitations || null,
+          grounding_status: firstResult.grounding_status || "limited",
+        });
+    }
+
     return new Response(
       JSON.stringify({
         data: {
@@ -1274,6 +2081,12 @@ IMPORTANT: Return ONLY the rewritten passage.
           title: formattedResults[0].title,
           body: formattedResults[0].body,
           disclaimers: formattedResults[0].disclaimers,
+          answer_text: formattedResults[0].answer_text,
+          citations: formattedResults[0].citations,
+          sources: formattedResults[0].sources,
+          source_limitations: formattedResults[0].source_limitations,
+          grounding_status: formattedResults[0].grounding_status,
+          chart_data: formattedResults[0].chart_data,
           // New options array
           options: formattedResults
         },

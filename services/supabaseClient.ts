@@ -51,6 +51,9 @@ export const triggerContentGeneration = async (payload: {
   rewriteMode?: 'rewrite' | 'shorten' | 'expand' | 'fix_compliance';
   complianceNote?: string;
   count?: number;
+  orgId?: string;
+  requestId?: string;
+  sourceUrls?: string[];
 }) => {
   const { data, error } = await supabase.functions.invoke('generate-content', {
     body: payload,
