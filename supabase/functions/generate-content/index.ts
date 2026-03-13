@@ -326,6 +326,47 @@ const chunkLongText = (text: string, maxChars = 900, overlap = 120) => {
   return out;
 };
 
+const getFallbackOfficialUrlsForTopic = (params: {
+  topic: string;
+  instructions: string;
+  currentContent: string;
+}) => {
+  const context = normalizeText(`${params.topic} ${params.instructions || ""} ${(params.currentContent || "").slice(0, 1500)}`);
+  const urls = new Set<string>();
+
+  if (
+    /\b(ira|roth|traditional ira|backdoor|retirement account|retirement arrangement)\b/.test(context)
+  ) {
+    urls.add("https://www.irs.gov/retirement-plans/individual-retirement-arrangements-iras");
+    urls.add("https://www.irs.gov/retirement-plans/traditional-and-roth-iras");
+    urls.add("https://www.irs.gov/publications/p590a");
+    urls.add("https://www.irs.gov/publications/p590b");
+    urls.add("https://www.irs.gov/retirement-plans/plan-participant-employee/retirement-topics-ira-contribution-limits");
+    urls.add("https://www.investor.gov/introduction-investing/general-resources/news-alerts/alerts-bulletins/investor-bulletins/individual-retirement-arrangements-iras");
+  }
+
+  if (/\b(401k|401\(k\)|elective deferral|retirement plan)\b/.test(context)) {
+    urls.add("https://www.irs.gov/retirement-plans/401k-plan-fix-it-guide");
+    urls.add("https://www.irs.gov/retirement-plans/plan-participant-employee/retirement-topics-401k-and-profit-sharing-plan-contribution-limits");
+  }
+
+  if (/\b(inflation|cpi|consumer price index|labor market|unemployment)\b/.test(context)) {
+    urls.add("https://www.bls.gov/cpi/");
+    urls.add("https://www.bls.gov/news.release/empsit.nr0.htm");
+  }
+
+  if (/\b(gdp|economic growth|national accounts)\b/.test(context)) {
+    urls.add("https://www.bea.gov/data/gdp/gross-domestic-product");
+  }
+
+  if (/\b(interest rate|federal funds|monetary policy|fed)\b/.test(context)) {
+    urls.add("https://www.federalreserve.gov/monetarypolicy/openmarket.htm");
+    urls.add("https://www.federalreserve.gov/newsevents/pressreleases/monetary.htm");
+  }
+
+  return Array.from(urls).slice(0, 6);
+};
+
 const fetchOfficialWebChunks = async (urls: string[], queryTerms: string[]) => {
   const chunks: RetrievedChunk[] = [];
   const safeUrls = urls
@@ -447,18 +488,26 @@ const retrieveGroundingChunks = async (params: {
     };
   });
 
-  const webChunks = await fetchOfficialWebChunks(params.sourceUrls || [], queryTerms);
+  const fallbackUrls = getFallbackOfficialUrlsForTopic({
+    topic: params.topic,
+    instructions: params.instructions,
+    currentContent: params.currentContent,
+  });
+  const urlCandidates = Array.from(new Set([...(params.sourceUrls || []), ...fallbackUrls])).slice(0, 8);
+  const webChunks = await fetchOfficialWebChunks(urlCandidates, queryTerms);
   const merged = dedupeChunks([...scoredStored, ...webChunks])
     .sort((a, b) => b.retrieval_score - a.retrieval_score);
 
   const topChunks = merged.slice(0, 14);
   const strongestScore = topChunks[0]?.retrieval_score || 0;
   const hasStrongGrounding = topChunks.length >= 2 && strongestScore >= 2.5;
+  const hasUsableGrounding = topChunks.length >= 1 && strongestScore >= 2;
 
   return {
     query,
     chunks: topChunks,
     hasStrongGrounding,
+    hasUsableGrounding,
   };
 };
 
@@ -1621,9 +1670,9 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
       groundingStatus = retrieval.hasStrongGrounding ? "grounded" : (retrievedChunks.length > 0 ? "limited" : "ungrounded");
       sourceLimitations = retrieval.hasStrongGrounding
         ? ""
-        : "Retrieved evidence was limited or weak for this request.";
+        : "Retrieved evidence was limited; grounded output may be narrower than requested.";
 
-      if (!retrieval.hasStrongGrounding) {
+      if (!retrieval.hasUsableGrounding) {
         const failureMessage = "I could not verify this from the available sources.";
         const payload = {
           answer_text: failureMessage,
