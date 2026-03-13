@@ -137,6 +137,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const fullscreenIframeRef = useRef<HTMLIFrameElement>(null);
+  const previewPaneRef = useRef<HTMLDivElement>(null);
+  const chartResizeFrameRef = useRef<number | null>(null);
 
   // Content State
   const [content, setContent] = useState<ContentVersion | null>(null);
@@ -3068,8 +3070,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             </p>
           )}
 
-          <div className="w-full min-w-0" style={{ height: data.type === 'horizontalBar' ? `${Math.max(300, (data.data?.length || 5) * 55)}px` : '360px' }}>
-            <ResponsiveContainer key={`chart-${inline ? 'inline' : 'block'}-${resizeKey}`} width="100%" height="100%">
+          <div className="w-full min-w-0" style={{ position: 'relative', height: data.type === 'horizontalBar' ? `${Math.max(300, (data.data?.length || 5) * 55)}px` : '360px' }}>
+            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}>
+              <ResponsiveContainer key={`chart-${inline ? 'inline' : 'block'}-${resizeKey}`} width="100%" height="100%">
               {data.type === 'stackedBar' ? (
                 <BarChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -3157,7 +3160,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   {data.dataKey2 && <Bar dataKey="value2" fill="#b3822f" radius={[4, 4, 0, 0]} name={data.dataLabel2 || 'Value 2'} />}
                 </BarChart>
               )}
-            </ResponsiveContainer>
+              </ResponsiveContainer>
+            </div>
           </div>
 
           {data.source && (
@@ -3171,24 +3175,54 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   }, []);
 
   useEffect(() => {
-    let frameId: number | null = null;
-    const handleWindowResize = () => {
-      if (frameId !== null) {
-        window.cancelAnimationFrame(frameId);
+    if (!chartData) return;
+
+    const scheduleChartResizeSync = () => {
+      if (chartResizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(chartResizeFrameRef.current);
       }
-      frameId = window.requestAnimationFrame(() => {
+      chartResizeFrameRef.current = window.requestAnimationFrame(() => {
         setChartResizeKey((prev) => prev + 1);
       });
     };
 
-    window.addEventListener('resize', handleWindowResize);
+    const observedNodes = [
+      previewPaneRef.current,
+      editorRef.current,
+      editorRef.current?.parentElement,
+    ].filter((node, index, self): node is HTMLElement => (
+      !!node && self.indexOf(node) === index
+    ));
+
+    scheduleChartResizeSync();
+
+    if (typeof ResizeObserver === 'undefined' || observedNodes.length === 0) {
+      window.addEventListener('resize', scheduleChartResizeSync);
+      return () => {
+        window.removeEventListener('resize', scheduleChartResizeSync);
+        if (chartResizeFrameRef.current !== null) {
+          window.cancelAnimationFrame(chartResizeFrameRef.current);
+          chartResizeFrameRef.current = null;
+        }
+      };
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      scheduleChartResizeSync();
+    });
+
+    observedNodes.forEach((node) => resizeObserver.observe(node));
+
     return () => {
-      window.removeEventListener('resize', handleWindowResize);
-      if (frameId !== null) {
-        window.cancelAnimationFrame(frameId);
+      resizeObserver.disconnect();
+      if (chartResizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(chartResizeFrameRef.current);
+        chartResizeFrameRef.current = null;
       }
     };
-  }, []);
+  }, [chartData, content?.id]);
+
+
 
   useEffect(() => {
     const roots = inlineChartRootsRef.current;
@@ -3216,7 +3250,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       }
       root.render(renderChartCard(chartData, true, chartResizeKey));
     });
-  }, [chartData, chartResizeKey, content?.body, renderChartCard]);
+  }, [chartData, chartResizeKey, notesWidth, content?.body, renderChartCard]);
 
   useEffect(() => {
     return () => {
@@ -3995,8 +4029,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               <p className="text-sm">Use the controls on the left to start a draft.</p>
             </div>
           ) : (
-            <div className="flex-1 overflow-y-auto custom-scrollbar">
-              <div className="w-full flex flex-col h-full bg-slate-50/50 p-6">
+            <div ref={previewPaneRef} className="flex-1 min-w-0 overflow-y-auto custom-scrollbar">
+              <div className="w-full min-w-0 flex flex-col h-full bg-slate-50/50 p-6">
                 <textarea
                   ref={titleRef}
                   className="w-full text-5xl font-extrabold mb-6 border-none focus:ring-0 placeholder-slate-300 text-slate-900 p-0 resize-none overflow-hidden bg-transparent leading-tight tracking-tight"
@@ -4060,7 +4094,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
                 <div
                   ref={editorRef}
-                  className="shrink-0 prose prose-slate prose-lg max-w-none focus:outline-none min-h-[300px] bg-white rounded-xl border border-slate-200 p-8 shadow-sm flow-root [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded-lg [&_img]:my-4"
+                  className="shrink-0 min-w-0 prose prose-slate prose-lg max-w-none focus:outline-none min-h-[300px] bg-white rounded-xl border border-slate-200 p-8 shadow-sm flow-root [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded-lg [&_img]:my-4"
                   contentEditable
                   suppressContentEditableWarning
                   dangerouslySetInnerHTML={{ __html: content.body }}
