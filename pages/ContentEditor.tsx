@@ -49,8 +49,7 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
-  ResponsiveContainer
+  Legend
 } from 'recharts';
 
 const GENERATION_STEPS = [
@@ -98,6 +97,212 @@ type GroundedGenerationOption = {
   grounding_status?: 'grounded' | 'limited' | 'ungrounded';
 };
 
+const getChartHeight = (data: any) => (
+  data?.type === 'horizontalBar'
+    ? Math.max(300, (data.data?.length || 5) * 55)
+    : 360
+);
+
+const getChartMinimumWidth = (data: any) => {
+  switch (data?.type) {
+    case 'horizontalBar':
+      return 720;
+    case 'pie':
+      return 360;
+    default:
+      return 520;
+  }
+};
+
+const ChartCard: React.FC<{ data: any; inline?: boolean }> = ({ data, inline = false }) => {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const chartInstanceIdRef = useRef(`chart-${Math.random().toString(36).slice(2, 10)}`);
+  const minimumWidth = getChartMinimumWidth(data);
+  const chartHeight = getChartHeight(data);
+  const lastValidWidthRef = useRef(minimumWidth);
+  const [viewportWidth, setViewportWidth] = useState(minimumWidth);
+
+  useEffect(() => {
+    lastValidWidthRef.current = Math.max(lastValidWidthRef.current, minimumWidth);
+    setViewportWidth((prev) => Math.max(prev, minimumWidth));
+  }, [minimumWidth]);
+
+  useEffect(() => {
+    const node = viewportRef.current;
+    if (!node) return;
+
+    const updateWidth = () => {
+      const measuredWidth = Math.floor(node.getBoundingClientRect().width);
+      if (measuredWidth >= 240) {
+        lastValidWidthRef.current = measuredWidth;
+        setViewportWidth((prev) => (prev === measuredWidth ? prev : measuredWidth));
+        return;
+      }
+
+      if (lastValidWidthRef.current > 0) {
+        setViewportWidth((prev) => (
+          prev === lastValidWidthRef.current ? prev : lastValidWidthRef.current
+        ));
+      }
+    };
+
+    updateWidth();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateWidth);
+      return () => {
+        window.removeEventListener('resize', updateWidth);
+      };
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+      }
+      resizeFrameRef.current = window.requestAnimationFrame(updateWidth);
+    });
+
+    resizeObserver.observe(node);
+
+    return () => {
+      resizeObserver.disconnect();
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+    };
+  }, [minimumWidth]);
+
+  const renderWidth = Math.max(viewportWidth, minimumWidth);
+  const areaFillId = `${chartInstanceIdRef.current}-area`;
+  const multiLineFill1Id = `${chartInstanceIdRef.current}-ml-1`;
+  const multiLineFill2Id = `${chartInstanceIdRef.current}-ml-2`;
+  const multiLineFill3Id = `${chartInstanceIdRef.current}-ml-3`;
+
+  if (!data) return null;
+
+  return (
+    <div
+      className={inline ? 'not-prose my-10' : 'shrink-0 mt-12 pt-8 border-t border-slate-100'}
+      contentEditable={false}
+      suppressContentEditableWarning
+    >
+      <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
+        <h3 style={{ fontFamily: "'Georgia', serif", fontSize: '1.35rem', fontWeight: 700, color: '#0f172a', margin: '0 0 6px 0' }}>
+          {data.title || 'Data Overview'}
+        </h3>
+
+        {data.subtitle && (
+          <p style={{ fontSize: '0.85rem', color: '#64748b', margin: '0 0 24px 0', lineHeight: 1.5 }}>
+            {data.subtitle}
+          </p>
+        )}
+
+        <div className="overflow-x-auto overflow-y-hidden">
+          <div ref={viewportRef} className="w-full min-w-0">
+            <div style={{ width: `${renderWidth}px`, minWidth: `${minimumWidth}px`, height: `${chartHeight}px` }}>
+              {data.type === 'stackedBar' ? (
+                <BarChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  {(data.stackKeys || ['value', 'value2', 'value3']).map((key: string, i: number) => (
+                    <Bar key={key} dataKey={key} stackId="a" fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][i % 6]} name={data.stackLabels?.[i] || key} />
+                  ))}
+                </BarChart>
+              ) : data.type === 'horizontalBar' ? (
+                <BarChart width={renderWidth} height={chartHeight} data={data.data} layout="vertical" margin={{ top: 10, right: 30, bottom: 10, left: 20 }}>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
+                  <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
+                  <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#334155' }} width={160} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                  <Bar dataKey="value" radius={[0, 4, 4, 0]} name={data.dataLabel || 'Value'}>
+                    {(data.data || []).map((_entry: any, index: number) => (
+                      <Cell key={`cell-${index}`} fill={['#1a365f', '#1f2758', '#7a2828', '#b3822f', '#4c6b36', '#1f5c7a', '#83a762'][index % 7]} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              ) : data.type === 'areaLine' ? (
+                <AreaChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  <defs>
+                    <linearGradient id={areaFillId} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#7a2828" stopOpacity={0.15} />
+                      <stop offset="95%" stopColor="#7a2828" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <Area type="monotone" dataKey="value" stroke="#7a2828" strokeWidth={2.5} fill={`url(#${areaFillId})`} dot={{ r: 4, fill: '#7a2828', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel || 'Value'} />
+                  {data.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel2 || 'Value 2'} />}
+                  {data.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel3 || 'Value 3'} />}
+                </AreaChart>
+              ) : data.type === 'multiLine' ? (
+                <AreaChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  <defs>
+                    <linearGradient id={multiLineFill1Id} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#1a365f" stopOpacity={0.12} /><stop offset="95%" stopColor="#1a365f" stopOpacity={0.01} /></linearGradient>
+                    <linearGradient id={multiLineFill2Id} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#b3822f" stopOpacity={0.12} /><stop offset="95%" stopColor="#b3822f" stopOpacity={0.01} /></linearGradient>
+                    <linearGradient id={multiLineFill3Id} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4c6b36" stopOpacity={0.12} /><stop offset="95%" stopColor="#4c6b36" stopOpacity={0.01} /></linearGradient>
+                  </defs>
+                  <Area type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} fill={`url(#${multiLineFill1Id})`} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel || 'Series 1'} />
+                  {data.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill={`url(#${multiLineFill2Id})`} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel2 || 'Series 2'} />}
+                  {data.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill={`url(#${multiLineFill3Id})`} dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel3 || 'Series 3'} />}
+                </AreaChart>
+              ) : data.type === 'line' ? (
+                <LineChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  <Line type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel || 'Value'} />
+                  {data.dataKey2 && <Line type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel2 || 'Value 2'} />}
+                </LineChart>
+              ) : data.type === 'pie' ? (
+                <PieChart width={renderWidth} height={chartHeight}>
+                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                  <Legend wrapperStyle={{ fontSize: '13px' }} />
+                  <Pie data={data.data} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={3} dataKey="value">
+                    {(data.data || []).map((_entry: any, index: number) => (
+                      <Cell key={`cell-${index}`} fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][index % 6]} />
+                    ))}
+                  </Pie>
+                </PieChart>
+              ) : (
+                <BarChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={data.yAxisPercent ? ((v: number) => `${v}%`) : undefined} />
+                  <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={data.yAxisPercent ? ((value: number) => `${value}%`) : undefined} />
+                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
+                  <Bar dataKey="value" fill="#1a365f" radius={[4, 4, 0, 0]} name={data.dataLabel || 'Value'} />
+                  {data.dataKey2 && <Bar dataKey="value2" fill="#b3822f" radius={[4, 4, 0, 0]} name={data.dataLabel2 || 'Value 2'} />}
+                </BarChart>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {data.source && (
+          <p style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic', marginTop: '16px', lineHeight: 1.5 }}>
+            {data.source}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -137,8 +342,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const fullscreenIframeRef = useRef<HTMLIFrameElement>(null);
-  const previewPaneRef = useRef<HTMLDivElement>(null);
-  const chartResizeFrameRef = useRef<number | null>(null);
 
   // Content State
   const [content, setContent] = useState<ContentVersion | null>(null);
@@ -382,7 +585,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [shortDuration, setShortDuration] = useState<1 | 2 | 3>(1);
   const [variationCount, setVariationCount] = useState<number>(1);
   const [chartData, setChartData] = useState<any | null>(null);
-  const [chartResizeKey, setChartResizeKey] = useState(0);
   const [citations, setCitations] = useState<CitationPayloadItem[]>([]);
   const [sources, setSources] = useState<CitationSourceItem[]>([]);
   const [sourceLimitations, setSourceLimitations] = useState<string>('');
@@ -3050,177 +3252,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     }
   };
 
-  const renderChartCard = useCallback((data: any, inline = false, resizeKey = 0) => {
+  const renderChartCard = useCallback((data: any, inline = false) => {
     if (!data) return null;
-
-    return (
-      <div
-        className={inline ? 'not-prose my-10' : 'shrink-0 mt-12 pt-8 border-t border-slate-100'}
-        contentEditable={false}
-        suppressContentEditableWarning
-      >
-        <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
-          <h3 style={{ fontFamily: "'Georgia', serif", fontSize: '1.35rem', fontWeight: 700, color: '#0f172a', margin: '0 0 6px 0' }}>
-            {data.title || 'Data Overview'}
-          </h3>
-
-          {data.subtitle && (
-            <p style={{ fontSize: '0.85rem', color: '#64748b', margin: '0 0 24px 0', lineHeight: 1.5 }}>
-              {data.subtitle}
-            </p>
-          )}
-
-          <div className="w-full min-w-0" style={{ position: 'relative', height: data.type === 'horizontalBar' ? `${Math.max(300, (data.data?.length || 5) * 55)}px` : '360px' }}>
-            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}>
-              <ResponsiveContainer key={`chart-${inline ? 'inline' : 'block'}-${resizeKey}`} width="100%" height="100%">
-              {data.type === 'stackedBar' ? (
-                <BarChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  {(data.stackKeys || ['value', 'value2', 'value3']).map((key: string, i: number) => (
-                    <Bar key={key} dataKey={key} stackId="a" fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][i % 6]} name={data.stackLabels?.[i] || key} />
-                  ))}
-                </BarChart>
-              ) : data.type === 'horizontalBar' ? (
-                <BarChart data={data.data} layout="vertical" margin={{ top: 10, right: 30, bottom: 10, left: 20 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
-                  <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
-                  <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#334155' }} width={160} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                  <Bar dataKey="value" radius={[0, 4, 4, 0]} name={data.dataLabel || 'Value'}>
-                    {data.data.map((_entry: any, index: number) => (
-                      <Cell key={`cell-${index}`} fill={['#1a365f', '#1f2758', '#7a2828', '#b3822f', '#4c6b36', '#1f5c7a', '#83a762'][index % 7]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              ) : data.type === 'areaLine' ? (
-                <AreaChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  <defs>
-                    <linearGradient id={inline ? 'areaFillInline1' : 'areaFill1'} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#7a2828" stopOpacity={0.15} />
-                      <stop offset="95%" stopColor="#7a2828" stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <Area type="monotone" dataKey="value" stroke="#7a2828" strokeWidth={2.5} fill={`url(#${inline ? 'areaFillInline1' : 'areaFill1'})`} dot={{ r: 4, fill: '#7a2828', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel || 'Value'} />
-                  {data.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel2 || 'Value 2'} />}
-                  {data.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel3 || 'Value 3'} />}
-                </AreaChart>
-              ) : data.type === 'multiLine' ? (
-                <AreaChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  <defs>
-                    <linearGradient id={inline ? 'mlFillInline1' : 'mlFill1'} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#1a365f" stopOpacity={0.12} /><stop offset="95%" stopColor="#1a365f" stopOpacity={0.01} /></linearGradient>
-                    <linearGradient id={inline ? 'mlFillInline2' : 'mlFill2'} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#b3822f" stopOpacity={0.12} /><stop offset="95%" stopColor="#b3822f" stopOpacity={0.01} /></linearGradient>
-                    <linearGradient id={inline ? 'mlFillInline3' : 'mlFill3'} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4c6b36" stopOpacity={0.12} /><stop offset="95%" stopColor="#4c6b36" stopOpacity={0.01} /></linearGradient>
-                  </defs>
-                  <Area type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} fill={`url(#${inline ? 'mlFillInline1' : 'mlFill1'})`} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel || 'Series 1'} />
-                  {data.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill={`url(#${inline ? 'mlFillInline2' : 'mlFill2'})`} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel2 || 'Series 2'} />}
-                  {data.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill={`url(#${inline ? 'mlFillInline3' : 'mlFill3'})`} dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel3 || 'Series 3'} />}
-                </AreaChart>
-              ) : data.type === 'line' ? (
-                <LineChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  <Line type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel || 'Value'} />
-                  {data.dataKey2 && <Line type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel2 || 'Value 2'} />}
-                </LineChart>
-              ) : data.type === 'pie' ? (
-                <PieChart>
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                  <Legend wrapperStyle={{ fontSize: '13px' }} />
-                  <Pie data={data.data} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={3} dataKey="value">
-                    {data.data.map((_entry: any, index: number) => (
-                      <Cell key={`cell-${index}`} fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][index % 6]} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              ) : (
-                <BarChart data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={data.yAxisPercent ? ((v: number) => `${v}%`) : undefined} />
-                  <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={data.yAxisPercent ? ((value: number) => `${value}%`) : undefined} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  <Bar dataKey="value" fill="#1a365f" radius={[4, 4, 0, 0]} name={data.dataLabel || 'Value'} />
-                  {data.dataKey2 && <Bar dataKey="value2" fill="#b3822f" radius={[4, 4, 0, 0]} name={data.dataLabel2 || 'Value 2'} />}
-                </BarChart>
-              )}
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {data.source && (
-            <p style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic', marginTop: '16px', lineHeight: 1.5 }}>
-              {data.source}
-            </p>
-          )}
-        </div>
-      </div>
-    );
+    return <ChartCard data={data} inline={inline} />;
   }, []);
-
-  useEffect(() => {
-    if (!chartData) return;
-
-    const scheduleChartResizeSync = () => {
-      if (chartResizeFrameRef.current !== null) {
-        window.cancelAnimationFrame(chartResizeFrameRef.current);
-      }
-      chartResizeFrameRef.current = window.requestAnimationFrame(() => {
-        setChartResizeKey((prev) => prev + 1);
-      });
-    };
-
-    const observedNodes = [
-      previewPaneRef.current,
-      editorRef.current,
-      editorRef.current?.parentElement,
-    ].filter((node, index, self): node is HTMLElement => (
-      !!node && self.indexOf(node) === index
-    ));
-
-    scheduleChartResizeSync();
-
-    if (typeof ResizeObserver === 'undefined' || observedNodes.length === 0) {
-      window.addEventListener('resize', scheduleChartResizeSync);
-      return () => {
-        window.removeEventListener('resize', scheduleChartResizeSync);
-        if (chartResizeFrameRef.current !== null) {
-          window.cancelAnimationFrame(chartResizeFrameRef.current);
-          chartResizeFrameRef.current = null;
-        }
-      };
-    }
-
-    const resizeObserver = new ResizeObserver(() => {
-      scheduleChartResizeSync();
-    });
-
-    observedNodes.forEach((node) => resizeObserver.observe(node));
-
-    return () => {
-      resizeObserver.disconnect();
-      if (chartResizeFrameRef.current !== null) {
-        window.cancelAnimationFrame(chartResizeFrameRef.current);
-        chartResizeFrameRef.current = null;
-      }
-    };
-  }, [chartData, content?.id]);
 
 
 
@@ -3248,9 +3283,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         root = createRoot(node);
         roots.set(node, root);
       }
-      root.render(renderChartCard(chartData, true, chartResizeKey));
+      root.render(renderChartCard(chartData, true));
     });
-  }, [chartData, chartResizeKey, notesWidth, content?.body, renderChartCard]);
+  }, [chartData, content?.body, renderChartCard]);
 
   useEffect(() => {
     return () => {
@@ -4029,7 +4064,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               <p className="text-sm">Use the controls on the left to start a draft.</p>
             </div>
           ) : (
-            <div ref={previewPaneRef} className="flex-1 min-w-0 overflow-y-auto custom-scrollbar">
+            <div className="flex-1 min-w-0 overflow-y-auto custom-scrollbar">
               <div className="w-full min-w-0 flex flex-col h-full bg-slate-50/50 p-6">
                 <textarea
                   ref={titleRef}
@@ -4159,7 +4194,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   </div>
                 )}
 
-                {chartData && !content.body.includes('data-cf-chart-slot="true"') && renderChartCard(chartData, false, chartResizeKey)}
+                {chartData && !content.body.includes('data-cf-chart-slot="true"') && renderChartCard(chartData, false)}
 
                 {(groundingStatus || sourceLimitations) && (
                   <div className="shrink-0 mt-10 pt-6 border-t border-slate-100">
