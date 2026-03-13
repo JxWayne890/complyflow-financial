@@ -596,6 +596,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const isVideoScript = contentType === 'video_script';
   const isBlogArticle = contentType === 'blog';
   const inlineChartRootsRef = useRef<Map<HTMLElement, Root>>(new Map());
+  const inlineChartSyncFrameRef = useRef<number | null>(null);
+  const isInlineChartSyncingRef = useRef(false);
 
   const [extensionStep, setExtensionStep] = useState(0);
   const extensionTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -3277,16 +3279,51 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
 
 
-  useEffect(() => {
+  const syncInlineCharts = useCallback((options?: { ensureSlot?: boolean }) => {
     const roots = inlineChartRootsRef.current;
+    const editorNode = editorRef.current;
+    const hasHtmlDocument = (content?.body || '').includes('<!DOCTYPE html>');
 
-    if (!editorRef.current || !chartData || content?.body?.includes('<!DOCTYPE html>')) {
+    if (!editorNode || !isBlogArticle || !chartData || hasHtmlDocument) {
       roots.forEach((root) => root.unmount());
       roots.clear();
       return;
     }
 
-    const slotNodes = Array.from(editorRef.current.querySelectorAll<HTMLElement>(BLOG_CHART_SLOT_SELECTOR));
+    const findSlotNodes = () => Array.from(editorNode.querySelectorAll<HTMLElement>(BLOG_CHART_SLOT_SELECTOR));
+    let slotNodes = findSlotNodes();
+
+    if (slotNodes.length === 0 && options?.ensureSlot) {
+      const slot = document.createElement('div');
+      slot.setAttribute('data-cf-chart-slot', 'true');
+      slot.setAttribute('contenteditable', 'false');
+
+      const paragraphs = Array.from(editorNode.children).filter((child) => child.tagName === 'P');
+      if (paragraphs.length >= 3) {
+        editorNode.insertBefore(slot, paragraphs[Math.min(2, paragraphs.length - 1)]);
+      } else if (paragraphs.length === 2) {
+        editorNode.insertBefore(slot, paragraphs[1]);
+      } else if (paragraphs.length === 1) {
+        if (paragraphs[0].nextSibling) {
+          editorNode.insertBefore(slot, paragraphs[0].nextSibling);
+        } else {
+          editorNode.appendChild(slot);
+        }
+      } else if (editorNode.children.length > 1) {
+        editorNode.insertBefore(slot, editorNode.children[Math.max(1, editorNode.children.length - 1)]);
+      } else {
+        editorNode.appendChild(slot);
+      }
+
+      slotNodes = [slot];
+
+      const normalizedBody = normalizeBlogBodyWithChartSlot(editorNode.innerHTML, chartData);
+      setContent((prev) => {
+        if (!prev || prev.body === normalizedBody) return prev;
+        return { ...prev, body: normalizedBody };
+      });
+    }
+
     roots.forEach((root, node) => {
       if (!slotNodes.includes(node)) {
         root.unmount();
@@ -3294,19 +3331,86 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       }
     });
 
+    isInlineChartSyncingRef.current = true;
     slotNodes.forEach((node) => {
       node.setAttribute('contenteditable', 'false');
       let root = roots.get(node);
       if (!root) {
+        node.innerHTML = '';
         root = createRoot(node);
         roots.set(node, root);
       }
       root.render(renderChartCard(chartData, true));
     });
-  }, [chartData, content?.body, renderChartCard]);
+
+    window.setTimeout(() => {
+      isInlineChartSyncingRef.current = false;
+    }, 0);
+  }, [chartData, content?.body, isBlogArticle, normalizeBlogBodyWithChartSlot, renderChartCard]);
+
+  const scheduleInlineChartSync = useCallback((options?: { ensureSlot?: boolean }) => {
+    if (inlineChartSyncFrameRef.current !== null) {
+      window.cancelAnimationFrame(inlineChartSyncFrameRef.current);
+    }
+    inlineChartSyncFrameRef.current = window.requestAnimationFrame(() => {
+      inlineChartSyncFrameRef.current = null;
+      syncInlineCharts(options);
+    });
+  }, [syncInlineCharts]);
+
+  useEffect(() => {
+    scheduleInlineChartSync({ ensureSlot: true });
+  }, [chartData, content?.body, isBlogArticle, scheduleInlineChartSync]);
+
+  useEffect(() => {
+    const editorNode = editorRef.current;
+    if (!editorNode || !isBlogArticle || !chartData) return;
+
+    const nodeTouchesChartSlot = (node: Node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (node.matches(BLOG_CHART_SLOT_SELECTOR)) return true;
+      return Boolean(node.querySelector(BLOG_CHART_SLOT_SELECTOR));
+    };
+
+    const observer = new MutationObserver((mutations) => {
+      if (isInlineChartSyncingRef.current) {
+        return;
+      }
+
+      let shouldSync = false;
+      for (const mutation of mutations) {
+        if (mutation.type !== 'childList') continue;
+        const target = mutation.target;
+        if (target instanceof HTMLElement && target.matches(BLOG_CHART_SLOT_SELECTOR) && target.childNodes.length === 0) {
+          shouldSync = true;
+          break;
+        }
+        if (Array.from(mutation.addedNodes).some(nodeTouchesChartSlot) || Array.from(mutation.removedNodes).some(nodeTouchesChartSlot)) {
+          shouldSync = true;
+          break;
+        }
+      }
+
+      if (shouldSync) {
+        scheduleInlineChartSync({ ensureSlot: true });
+      }
+    });
+
+    observer.observe(editorNode, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [chartData, isBlogArticle, scheduleInlineChartSync]);
+
+  useEffect(() => {
+    if (!isResizingNotes) return;
+    scheduleInlineChartSync({ ensureSlot: true });
+  }, [isResizingNotes, scheduleInlineChartSync]);
 
   useEffect(() => {
     return () => {
+      if (inlineChartSyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(inlineChartSyncFrameRef.current);
+        inlineChartSyncFrameRef.current = null;
+      }
       inlineChartRootsRef.current.forEach((root) => root.unmount());
       inlineChartRootsRef.current.clear();
     };
@@ -4181,6 +4285,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     const nextBody = isBlogArticle
                       ? normalizeBlogBodyWithChartSlot(e.currentTarget.innerHTML, chartData)
                       : sanitizeBlogBodyForStorage(e.currentTarget.innerHTML);
+                    if (isBlogArticle && chartData) {
+                      scheduleInlineChartSync({ ensureSlot: true });
+                    }
                     if (nextBody === content.body) {
                       return;
                     }
