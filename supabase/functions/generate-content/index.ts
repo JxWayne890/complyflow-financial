@@ -604,6 +604,32 @@ const normalizeAnswerCitationMarkers = (answerText: string, citations: CitationR
     return allowedMarkers.has(marker) ? marker : "";
   });
 
+  const hasVisibleMarker = normalizedCitations.some((citation) => normalizedText.includes(citation.marker));
+  if (!hasVisibleMarker) {
+    const lines = normalizedText.split("\n");
+    const paragraphIndexes = lines
+      .map((line, index) => ({ line: line.trim(), index }))
+      .filter(({ line }) => (
+        Boolean(line) &&
+        !line.startsWith("#") &&
+        !line.toLowerCase().startsWith("<script") &&
+        !line.toLowerCase().startsWith("</script")
+      ))
+      .map(({ index }) => index);
+
+    if (paragraphIndexes.length === 0) {
+      normalizedText = `${normalizedText.trim()}\n\n${normalizedCitations.map((citation) => citation.marker).join(" ")}`.trim();
+    } else {
+      normalizedCitations.forEach((citation, index) => {
+        const targetLineIndex = paragraphIndexes[Math.min(index, paragraphIndexes.length - 1)];
+        if (!lines[targetLineIndex].includes(citation.marker)) {
+          lines[targetLineIndex] = `${lines[targetLineIndex].trim()} ${citation.marker}`.trim();
+        }
+      });
+      normalizedText = lines.join("\n");
+    }
+  }
+
   return {
     answerText: normalizedText.trim(),
     citations: normalizedCitations,
@@ -1570,7 +1596,7 @@ No text overlays unless essential. No logos. No faces if possible, focus on conc
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
     const isBlogType = contentType && contentType.toLowerCase() === 'blog';
-    const shouldGround = isBlogType && action === "generate";
+    const shouldGround = isBlogType && (action === "generate" || action === "extend");
     let retrievedChunks: RetrievedChunk[] = [];
     let retrievalQuery = "";
     let groundingStatus: "grounded" | "limited" | "ungrounded" = "ungrounded";
@@ -1726,7 +1752,59 @@ JSON constraints:
     }
 
     if (action === "extend") {
-      userContent = `
+      if (shouldGround) {
+        const retrievalContext = buildGroundingContextForPrompt(retrievedChunks);
+        systemPrompt = `${legacyWealthBlogStyle}
+
+Grounding policy (must follow):
+- Use ONLY retrieved chunk evidence provided by the user context.
+- Never cite, reference, or imply any source that is not in retrieved chunks.
+- If sources conflict, explicitly describe the conflict with citations on both sides.
+- If a statement is inference/synthesis, label that sentence with "(Inference)" and cite supporting chunks.
+- If evidence is incomplete, state that uncertainty briefly under "source_limitations".`;
+
+        userContent = `User request topic: ${topic}
+Length requirement: ${lengthInstruction}
+Additional user instructions: ${instructions || "None"}
+
+Existing draft to expand:
+${currentContent.slice(0, 12000)}
+
+Retrieved chunks (approved evidence only):
+${retrievalContext}
+
+Return STRICT JSON with exactly these keys:
+{
+  "title": "string",
+  "answer_text": "expanded markdown article with inline citation markers like [1], [2]",
+  "citations": [
+    {
+      "marker": "[1]",
+      "source_id": "src_...",
+      "chunk_index": 3,
+      "quoted_span": "short excerpt copied from the supporting chunk"
+    }
+  ],
+  "source_limitations": "short note when confidence is reduced; empty string when confidence is high",
+  "chart_data": {
+    "title": "Chart title",
+    "subtitle": "One-line description",
+    "type": "bar",
+    "dataLabel": "Series label",
+    "data": [{"name":"A","value":10}]
+  }
+}
+
+JSON constraints:
+- Expand and improve the draft substantially while preserving core meaning and structure.
+- "citations" must only reference source_id + chunk_index pairs that exist in retrieved chunks.
+- Every factual compliance claim should include at least one citation marker.
+- Keep quoted_span short (max ~240 chars), and it must appear in the cited chunk.
+- If a chart is not needed, set "chart_data" to null.
+- Do not include Markdown code fences.
+- Do not output any text before or after the JSON.`;
+      } else {
+        userContent = `
 You are rewriting and expanding an existing draft.
 Current Draft:
 """
@@ -1742,6 +1820,7 @@ Task:
 
 Return the FULL expanded article.
 `;
+      }
     }
 
     if (action === "rewrite") {

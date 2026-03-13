@@ -1284,6 +1284,10 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               setShowImageSelection(true);
             } else if (imageResponse.data) {
               const imgHtml = imageResponse.data.body;
+              const persistedCitations = ((savedVersion as any).citation_payload || citations) as CitationPayloadItem[];
+              const persistedSources = ((savedVersion as any).source_payload || sources) as CitationSourceItem[];
+              const persistedSourceLimitations = (savedVersion as any).source_limitations || sourceLimitations || '';
+              const persistedGroundingStatus = (savedVersion as any).grounding_status || groundingStatus || null;
               const newBody = isBlogArticle
                 ? insertInlineImageIntoBlogBody(savedVersion.body, imgHtml, chartData || (savedVersion as any).chart_data || null)
                 : `${imgHtml}<br/><hr/><br/>${savedVersion.body}`;
@@ -1293,11 +1297,15 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                 body: newBody,
                 disclaimers: savedVersion.disclaimers,
                 chart_data: chartData || (savedVersion as any).chart_data || null,
-                citation_payload: citations,
-                source_payload: sources,
-                source_limitations: sourceLimitations,
-                grounding_status: groundingStatus,
+                citation_payload: persistedCitations,
+                source_payload: persistedSources,
+                source_limitations: persistedSourceLimitations,
+                grounding_status: persistedGroundingStatus,
               });
+              setCitations(persistedCitations);
+              setSources(persistedSources);
+              setSourceLimitations(persistedSourceLimitations);
+              setGroundingStatus(persistedGroundingStatus);
               setContent(updatedVersion);
             }
           } catch (imgErr: any) {
@@ -1484,16 +1492,29 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           throw new Error('No request selected to save extension changes.');
         }
 
+        const { body: cleanedBody, chartData: parsedChartData } = extractChartData(response.data.body || content.body);
+        const nextChartData = parsedChartData ?? response.data.chart_data ?? chartData;
+        const nextCitations = (response.data.citations || citations) as CitationPayloadItem[];
+        const nextSources = (response.data.sources || sources) as CitationSourceItem[];
+        const nextSourceLimitations = response.data.source_limitations || sourceLimitations;
+        const nextGroundingStatus = response.data.grounding_status || groundingStatus;
+
+        setChartData(nextChartData);
+        setCitations(nextCitations);
+        setSources(nextSources);
+        setSourceLimitations(nextSourceLimitations);
+        setGroundingStatus(nextGroundingStatus);
+
         const savedVersion = await createContentVersion(requestId, {
           generated_by: 'ai',
           title: content.title,
-          body: isBlogArticle ? ensureBlogChartSlot(response.data.body || content.body, chartData) : (response.data.body || content.body),
+          body: isBlogArticle ? ensureBlogChartSlot(cleanedBody || content.body, nextChartData) : (cleanedBody || content.body),
           disclaimers: content.disclaimers,
-          chart_data: chartData,
-          citation_payload: citations,
-          source_payload: sources,
-          source_limitations: sourceLimitations,
-          grounding_status: groundingStatus,
+          chart_data: nextChartData,
+          citation_payload: nextCitations,
+          source_payload: nextSources,
+          source_limitations: nextSourceLimitations,
+          grounding_status: nextGroundingStatus,
         });
 
         const highlightedBody = handleHighlightAnimation(previousBody, savedVersion.body);
