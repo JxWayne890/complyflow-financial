@@ -46,6 +46,34 @@ type SourceRecord = {
   source_type: string;
 };
 
+const uploadToImgBB = async (base64Data: string): Promise<string> => {
+  const apiKey = Deno.env.get("IMGBB_API_KEY");
+  if (!apiKey) throw new Error("Missing IMGBB_API_KEY secret.");
+
+  const cleanBase64 = base64Data.replace(/^data:image\/[a-z]+;base64,/, "");
+
+  const formData = new FormData();
+  formData.append("key", apiKey);
+  formData.append("image", cleanBase64);
+
+  const response = await fetch("https://api.imgbb.com/1/upload", {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`IMGBB upload failed: ${response.status} ${text}`);
+  }
+
+  const result = await response.json();
+  if (!result?.data?.url) {
+    throw new Error("IMGBB upload returned no URL.");
+  }
+
+  return result.data.url;
+};
+
 const SUPPORTED_CHART_TYPES = new Set([
   "bar",
   "stackedBar",
@@ -2489,8 +2517,15 @@ async function generateImageWithGemini(params: {
   }
 
   const mimeType = imagePart.inlineData.mimeType || "image/png";
+  let imgSrc: string;
+  try {
+    imgSrc = await uploadToImgBB(imagePart.inlineData.data);
+  } catch (uploadErr) {
+    console.error("IMGBB upload failed, falling back to base64:", uploadErr);
+    imgSrc = `data:${mimeType};base64,${imagePart.inlineData.data}`;
+  }
   const html = `<figure style="margin:0;">
-  <img src="data:${mimeType};base64,${imagePart.inlineData.data}" alt="${escapeHtml(caption)}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin-bottom:12px;" />
+  <img src="${imgSrc}" alt="${escapeHtml(caption)}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin-bottom:12px;" />
   <figcaption style="font-size:14px;color:#64748b;">${escapeHtml(caption)}</figcaption>
 </figure>`;
 
@@ -2532,7 +2567,17 @@ async function generateImageWithChatGPT(params: {
     };
   }
 
-  const src = imageBase64 ? `data:image/png;base64,${imageBase64}` : imageUrl;
+  let src: string;
+  if (imageBase64) {
+    try {
+      src = await uploadToImgBB(imageBase64);
+    } catch (uploadErr) {
+      console.error("IMGBB upload failed, falling back to base64:", uploadErr);
+      src = `data:image/png;base64,${imageBase64}`;
+    }
+  } else {
+    src = imageUrl;
+  }
   const html = `<figure style="margin:0;">
   <img src="${src}" alt="${escapeHtml(caption)}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin-bottom:12px;" />
   <figcaption style="font-size:14px;color:#64748b;">${escapeHtml(caption)}</figcaption>
