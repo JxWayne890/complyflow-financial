@@ -54,6 +54,12 @@ export const triggerContentGeneration = async (payload: {
   orgId?: string;
   requestId?: string;
   sourceUrls?: string[];
+  clientContext?: {
+    writing_style?: string;
+    brand_tone?: string;
+    business_description?: string;
+    audience_type?: string;
+  };
 }) => {
   const { data, error } = await supabase.functions.invoke('generate-content', {
     body: payload,
@@ -91,6 +97,77 @@ export const triggerTopicGeneration = async (
     throw new Error(data.error);
   }
 
+  return data;
+};
+
+// ── In-app Notifications ─────────────────────────────────────────────
+
+export const fetchNotifications = async (userId: string) => {
+  const { data, error } = await supabase
+    .from('notifications')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(30);
+
+  if (error) {
+    console.error('Error fetching notifications:', error);
+    return [];
+  }
+  return data ?? [];
+};
+
+export const markNotificationRead = async (notificationId: string) => {
+  const { error } = await supabase
+    .from('notifications')
+    .update({ read: true })
+    .eq('id', notificationId);
+
+  if (error) console.error('Error marking notification read:', error);
+};
+
+export const markAllNotificationsRead = async (userId: string) => {
+  const { error } = await supabase
+    .from('notifications')
+    .update({ read: true })
+    .eq('user_id', userId)
+    .eq('read', false);
+
+  if (error) console.error('Error marking all notifications read:', error);
+};
+
+export const insertNotification = async (payload: {
+  org_id: string;
+  user_id: string;
+  type: string;
+  title: string;
+  message: string;
+  link?: string;
+}) => {
+  const { error } = await supabase.from('notifications').insert(payload);
+  if (error) console.error('Error inserting notification:', error);
+};
+
+// ── Email Notifications ──────────────────────────────────────────────
+
+export const triggerSocialPost = async (payload: {
+  request_id: string;
+  org_id: string;
+  platform: string;
+  content_text: string;
+  image_url?: string;
+  client_id: string;
+}) => {
+  const { data, error } = await supabase.functions.invoke('post-to-social', {
+    body: payload,
+  });
+
+  if (error) {
+    const message = await extractFunctionErrorMessage(error);
+    throw new Error(message);
+  }
+
+  if (data?.error) throw new Error(data.error);
   return data;
 };
 

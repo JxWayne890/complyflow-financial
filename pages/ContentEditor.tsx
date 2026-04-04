@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
 import { createRoot, Root } from 'react-dom/client';
-import { triggerContentGeneration, triggerReviewNotification, insertNotification, supabase } from '../services/supabaseClient';
+import { triggerContentGeneration, triggerReviewNotification, triggerSocialPost, insertNotification, supabase } from '../services/supabaseClient';
 import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client, CitationPayloadItem, CitationSourceItem } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
@@ -33,7 +33,9 @@ import {
   BarChart3,
   ShieldCheck,
   Lock,
-  Unlock
+  Unlock,
+  Share2,
+  Video
 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import ChartCard, { getChartHeight, getChartMinimumWidth } from '../components/ChartCard';
@@ -155,6 +157,11 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [isCopyingForBlog, setIsCopyingForBlog] = useState(false);
   const [copyForBlogSuccess, setCopyForBlogSuccess] = useState(false);
   const [isApprovedLocked, setIsApprovedLocked] = useState(false);
+  const [showPostToSocial, setShowPostToSocial] = useState(false);
+  const [socialAccounts, setSocialAccounts] = useState<{ platform: string; blotato_connection_id: string | null }[]>([]);
+  const [postingPlatform, setPostingPlatform] = useState<string | null>(null);
+  const [postingSuccess, setPostingSuccess] = useState<Record<string, boolean>>({});
+  const [postingError, setPostingError] = useState<Record<string, string>>({});
   const [complianceEditMode, setComplianceEditMode] = useState(false);
   const [isSavingComplianceEdit, setIsSavingComplianceEdit] = useState(false);
 
@@ -4284,6 +4291,88 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                       <Unlock size={13} />
                       Unlock & Edit
                     </button>
+                  </div>
+                )}
+
+                {status === ContentStatus.APPROVED && savedClientId && content?.body && (
+                  <div className="mt-4">
+                    {!showPostToSocial ? (
+                      <button
+                        onClick={async () => {
+                          setShowPostToSocial(true);
+                          const { data } = await supabase
+                            .from('client_social_accounts')
+                            .select('platform, blotato_connection_id')
+                            .eq('client_id', savedClientId);
+                          setSocialAccounts(data || []);
+                        }}
+                        className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                      >
+                        <Share2 size={16} />
+                        Post to Social
+                      </button>
+                    ) : (
+                      <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-sm font-semibold text-slate-800">Post to Social Media</h4>
+                          <button onClick={() => setShowPostToSocial(false)} className="text-slate-400 hover:text-slate-600">
+                            <X size={16} />
+                          </button>
+                        </div>
+                        {socialAccounts.length === 0 ? (
+                          <p className="text-sm text-slate-500">No social accounts connected for this client. Connect accounts in the Client Detail page.</p>
+                        ) : (
+                          <div className="space-y-2">
+                            {socialAccounts.filter(a => a.blotato_connection_id).map(account => (
+                              <div key={account.platform} className="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2">
+                                <span className="text-sm font-medium text-slate-700 capitalize">{account.platform}</span>
+                                <div className="flex items-center gap-2">
+                                  {postingSuccess[account.platform] ? (
+                                    <span className="text-xs text-emerald-600 font-medium flex items-center gap-1"><CheckCircle2 size={14} /> Posted</span>
+                                  ) : postingError[account.platform] ? (
+                                    <span className="text-xs text-red-600 font-medium">{postingError[account.platform]}</span>
+                                  ) : (
+                                    <button
+                                      disabled={postingPlatform === account.platform}
+                                      onClick={async () => {
+                                        setPostingPlatform(account.platform);
+                                        setPostingError(prev => ({ ...prev, [account.platform]: '' }));
+                                        try {
+                                          const plainText = content.body.replace(/<[^>]+>/g, '').trim();
+                                          const postText = contentType === 'blog'
+                                            ? plainText.split('\n').filter(Boolean)[0]?.slice(0, 280) || plainText.slice(0, 280)
+                                            : plainText;
+
+                                          const imgMatch = content.body.match(/<img[^>]+src="(https?:\/\/[^"]+)"/);
+                                          await triggerSocialPost({
+                                            request_id: requestId!,
+                                            org_id: profile?.org_id || '',
+                                            platform: account.platform,
+                                            content_text: postText,
+                                            image_url: imgMatch?.[1],
+                                            client_id: savedClientId,
+                                          });
+                                          setPostingSuccess(prev => ({ ...prev, [account.platform]: true }));
+                                          setStatus(ContentStatus.POSTED);
+                                        } catch (err: any) {
+                                          setPostingError(prev => ({ ...prev, [account.platform]: err.message || 'Failed' }));
+                                        } finally {
+                                          setPostingPlatform(null);
+                                        }
+                                      }}
+                                      className="flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-colors disabled:opacity-50"
+                                    >
+                                      {postingPlatform === account.platform ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+                                      Post
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
