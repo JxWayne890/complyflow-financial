@@ -1,15 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
+import ForgotPassword from './pages/ForgotPassword';
 import TopicSelector from './pages/TopicSelector';
 import ContentEditor from './pages/ContentEditor';
 import ClientsList from './pages/ClientsList';
 import ClientDetail from './pages/ClientDetail';
 import MyLibrary from './pages/MyLibrary';
 import Settings from './pages/Settings';
+import ClientPicker from './pages/ClientPicker';
 
 import { UserRole, Profile } from './types';
 import { supabase } from './services/supabaseClient';
@@ -67,75 +70,105 @@ const App: React.FC = () => {
     );
   }
 
-  const userRole = profile?.role || UserRole.ADVISOR;
+  if (!session || !profile) {
+    return (
+      <HashRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/signup" element={<Signup />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="*" element={<Navigate to="/login" />} />
+        </Routes>
+      </HashRouter>
+    );
+  }
 
-  // Demo Profile Fallback
-  const effectiveProfile: Profile = profile || {
-    id: '00000000-0000-0000-0000-000000000000',
-    name: 'Demo User',
-    email: 'demo@example.com',
-    role: UserRole.ADVISOR,
-    org_id: '00000000-0000-0000-0000-000000000000'
-  };
+  const userRole = profile.role;
 
   return (
     <HashRouter>
       <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/signup" element={<Signup />} />
+        <Route path="/login" element={<Navigate to="/" />} />
+        <Route path="/signup" element={<Navigate to="/" />} />
+        <Route path="/forgot-password" element={<Navigate to="/" />} />
 
-        {/* Protected Routes (with Demo Fallback) */}
         <Route path="/" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <Dashboard userRole={userRole} profile={effectiveProfile} />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <Dashboard userRole={userRole} profile={profile} />
+            </ErrorBoundary>
+          </Layout>
+        } />
+
+        <Route path="/select-client" element={
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <ClientPicker profile={profile} />
+            </ErrorBoundary>
           </Layout>
         } />
 
         <Route path="/topics" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <TopicSelector profile={effectiveProfile} />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <TopicSelector profile={profile} />
+            </ErrorBoundary>
           </Layout>
         } />
 
         <Route path="/create" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <ContentEditor userRole={userRole} profile={effectiveProfile} />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <ContentEditor userRole={userRole} profile={profile} />
+            </ErrorBoundary>
           </Layout>
         } />
 
         <Route path="/content/:id" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <ContentEditor userRole={userRole} profile={effectiveProfile} />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <ContentEditor userRole={userRole} profile={profile} />
+            </ErrorBoundary>
           </Layout>
         } />
 
         <Route path="/clients" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <ClientsList profile={effectiveProfile} />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <ClientsList profile={profile} />
+            </ErrorBoundary>
           </Layout>
         } />
 
         <Route path="/library" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <MyLibrary />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <MyLibrary />
+            </ErrorBoundary>
           </Layout>
         } />
 
         <Route path="/clients/:id" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <ClientDetail profile={effectiveProfile} />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <ClientDetail profile={profile} />
+            </ErrorBoundary>
           </Layout>
         } />
 
         <Route path="/compliance" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <Dashboard userRole={userRole} profile={effectiveProfile} />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <Dashboard userRole={userRole} profile={profile} />
+            </ErrorBoundary>
           </Layout>
         } />
 
         <Route path="/settings" element={
-          <Layout userRole={userRole} profile={effectiveProfile}>
-            <Settings profile={effectiveProfile} />
+          <Layout userRole={userRole} profile={profile}>
+            <ErrorBoundary>
+              <Settings profile={profile} />
+            </ErrorBoundary>
           </Layout>
         } />
 
