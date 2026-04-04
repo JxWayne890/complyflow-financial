@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
 import { createRoot, Root } from 'react-dom/client';
-import { triggerContentGeneration, triggerReviewNotification, triggerSocialPost, insertNotification, supabase } from '../services/supabaseClient';
+import { triggerContentGeneration, triggerReviewNotification, triggerSocialPost, triggerVideoGeneration, insertNotification, supabase } from '../services/supabaseClient';
 import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client, CitationPayloadItem, CitationSourceItem } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
@@ -162,6 +162,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [postingPlatform, setPostingPlatform] = useState<string | null>(null);
   const [postingSuccess, setPostingSuccess] = useState<Record<string, boolean>>({});
   const [postingError, setPostingError] = useState<Record<string, string>>({});
+  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
+  const [videoMessage, setVideoMessage] = useState<string | null>(null);
   const [complianceEditMode, setComplianceEditMode] = useState(false);
   const [isSavingComplianceEdit, setIsSavingComplianceEdit] = useState(false);
 
@@ -4372,6 +4374,38 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                           </div>
                         )}
                       </div>
+                    )}
+                  </div>
+                )}
+
+                {contentType === 'video_script' && status === ContentStatus.APPROVED && content?.body && (
+                  <div className="mt-4 space-y-2">
+                    <button
+                      onClick={async () => {
+                        setIsGeneratingVideo(true);
+                        setVideoMessage(null);
+                        try {
+                          const plainScript = content.body.replace(/<[^>]+>/g, '').trim();
+                          const result = await triggerVideoGeneration({
+                            request_id: requestId!,
+                            org_id: profile?.org_id || '',
+                            script_text: plainScript,
+                          });
+                          setVideoMessage(result?.data?.message || 'Video generation request submitted.');
+                        } catch (err: any) {
+                          setVideoMessage(err.message || 'Video generation failed.');
+                        } finally {
+                          setIsGeneratingVideo(false);
+                        }
+                      }}
+                      disabled={isGeneratingVideo}
+                      className="flex items-center gap-2 bg-gradient-to-r from-purple-600 to-violet-600 hover:from-purple-700 hover:to-violet-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm disabled:opacity-50"
+                    >
+                      {isGeneratingVideo ? <Loader2 size={16} className="animate-spin" /> : <Video size={16} />}
+                      Generate Video
+                    </button>
+                    {videoMessage && (
+                      <p className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">{videoMessage}</p>
                     )}
                   </div>
                 )}

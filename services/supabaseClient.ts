@@ -171,6 +171,26 @@ export const triggerSocialPost = async (payload: {
   return data;
 };
 
+export const triggerVideoGeneration = async (payload: {
+  request_id: string;
+  org_id: string;
+  script_text: string;
+  avatar_id?: string;
+  voice_id?: string;
+}) => {
+  const { data, error } = await supabase.functions.invoke('generate-video', {
+    body: payload,
+  });
+
+  if (error) {
+    const message = await extractFunctionErrorMessage(error);
+    throw new Error(message);
+  }
+
+  if (data?.error) throw new Error(data.error);
+  return data;
+};
+
 export const triggerReviewNotification = async (payload: {
   request_id: string;
   org_id: string;
