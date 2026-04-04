@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
 import { createRoot, Root } from 'react-dom/client';
-import { triggerContentGeneration, triggerReviewNotification, supabase } from '../services/supabaseClient';
+import { triggerContentGeneration, triggerReviewNotification, insertNotification, supabase } from '../services/supabaseClient';
 import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client, CitationPayloadItem, CitationSourceItem } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
@@ -35,22 +35,11 @@ import {
   Lock,
   Unlock
 } from 'lucide-react';
-import {
-  BarChart,
-  Bar,
-  LineChart,
-  Line,
-  AreaChart,
-  Area,
-  PieChart,
-  Pie,
-  Cell,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend
-} from 'recharts';
+import html2canvas from 'html2canvas';
+import ChartCard, { getChartHeight, getChartMinimumWidth } from '../components/ChartCard';
+import ApprovalTimeline from '../components/ApprovalTimeline';
+import { sanitizePromptInput, sanitizeTopicInput } from '../lib/sanitize';
+import { uploadBlobToImgBB, uploadBase64ToImgBB } from '../lib/imgbb';
 
 const GENERATION_STEPS = [
   { id: 0, label: 'Connecting to AI Engine', icon: Sparkles, duration: 1500 },
@@ -97,211 +86,6 @@ type GroundedGenerationOption = {
   grounding_status?: 'grounded' | 'limited' | 'ungrounded';
 };
 
-const getChartHeight = (data: any) => (
-  data?.type === 'horizontalBar'
-    ? Math.max(300, (data.data?.length || 5) * 55)
-    : 360
-);
-
-const getChartMinimumWidth = (data: any) => {
-  switch (data?.type) {
-    case 'horizontalBar':
-      return 720;
-    case 'pie':
-      return 360;
-    default:
-      return 520;
-  }
-};
-
-const ChartCard: React.FC<{ data: any; inline?: boolean }> = ({ data, inline = false }) => {
-  const viewportRef = useRef<HTMLDivElement>(null);
-  const resizeFrameRef = useRef<number | null>(null);
-  const chartInstanceIdRef = useRef(`chart-${Math.random().toString(36).slice(2, 10)}`);
-  const minimumWidth = getChartMinimumWidth(data);
-  const chartHeight = getChartHeight(data);
-  const lastValidWidthRef = useRef(minimumWidth);
-  const [viewportWidth, setViewportWidth] = useState(minimumWidth);
-
-  useEffect(() => {
-    lastValidWidthRef.current = Math.max(lastValidWidthRef.current, minimumWidth);
-    setViewportWidth((prev) => Math.max(prev, minimumWidth));
-  }, [minimumWidth]);
-
-  useEffect(() => {
-    const node = viewportRef.current;
-    if (!node) return;
-
-    const updateWidth = () => {
-      const measuredWidth = Math.floor(node.getBoundingClientRect().width);
-      if (measuredWidth >= 240) {
-        lastValidWidthRef.current = measuredWidth;
-        setViewportWidth((prev) => (prev === measuredWidth ? prev : measuredWidth));
-        return;
-      }
-
-      if (lastValidWidthRef.current > 0) {
-        setViewportWidth((prev) => (
-          prev === lastValidWidthRef.current ? prev : lastValidWidthRef.current
-        ));
-      }
-    };
-
-    updateWidth();
-
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', updateWidth);
-      return () => {
-        window.removeEventListener('resize', updateWidth);
-      };
-    }
-
-    const resizeObserver = new ResizeObserver(() => {
-      if (resizeFrameRef.current !== null) {
-        window.cancelAnimationFrame(resizeFrameRef.current);
-      }
-      resizeFrameRef.current = window.requestAnimationFrame(updateWidth);
-    });
-
-    resizeObserver.observe(node);
-
-    return () => {
-      resizeObserver.disconnect();
-      if (resizeFrameRef.current !== null) {
-        window.cancelAnimationFrame(resizeFrameRef.current);
-        resizeFrameRef.current = null;
-      }
-    };
-  }, [minimumWidth]);
-
-  const renderWidth = Math.max(viewportWidth, minimumWidth);
-  const areaFillId = `${chartInstanceIdRef.current}-area`;
-  const multiLineFill1Id = `${chartInstanceIdRef.current}-ml-1`;
-  const multiLineFill2Id = `${chartInstanceIdRef.current}-ml-2`;
-  const multiLineFill3Id = `${chartInstanceIdRef.current}-ml-3`;
-
-  if (!data) return null;
-
-  return (
-    <div
-      className={inline ? 'not-prose my-10' : 'shrink-0 mt-12 pt-8 border-t border-slate-100'}
-      contentEditable={false}
-      suppressContentEditableWarning
-    >
-      <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
-        <h3 style={{ fontFamily: "'Georgia', serif", fontSize: '1.35rem', fontWeight: 700, color: '#0f172a', margin: '0 0 6px 0' }}>
-          {data.title || 'Data Overview'}
-        </h3>
-
-        {data.subtitle && (
-          <p style={{ fontSize: '0.85rem', color: '#64748b', margin: '0 0 24px 0', lineHeight: 1.5 }}>
-            {data.subtitle}
-          </p>
-        )}
-
-        <div className="overflow-x-auto overflow-y-hidden">
-          <div ref={viewportRef} className="w-full min-w-0">
-            <div style={{ width: `${renderWidth}px`, minWidth: `${minimumWidth}px`, height: `${chartHeight}px` }}>
-              {data.type === 'stackedBar' ? (
-                <BarChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  {(data.stackKeys || ['value', 'value2', 'value3']).map((key: string, i: number) => (
-                    <Bar key={key} dataKey={key} stackId="a" fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][i % 6]} name={data.stackLabels?.[i] || key} />
-                  ))}
-                </BarChart>
-              ) : data.type === 'horizontalBar' ? (
-                <BarChart width={renderWidth} height={chartHeight} data={data.data} layout="vertical" margin={{ top: 10, right: 30, bottom: 10, left: 20 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
-                  <XAxis type="number" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
-                  <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#334155' }} width={160} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                  <Bar dataKey="value" radius={[0, 4, 4, 0]} name={data.dataLabel || 'Value'}>
-                    {(data.data || []).map((_entry: any, index: number) => (
-                      <Cell key={`cell-${index}`} fill={['#1a365f', '#1f2758', '#7a2828', '#b3822f', '#4c6b36', '#1f5c7a', '#83a762'][index % 7]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              ) : data.type === 'areaLine' ? (
-                <AreaChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  <defs>
-                    <linearGradient id={areaFillId} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#7a2828" stopOpacity={0.15} />
-                      <stop offset="95%" stopColor="#7a2828" stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <Area type="monotone" dataKey="value" stroke="#7a2828" strokeWidth={2.5} fill={`url(#${areaFillId})`} dot={{ r: 4, fill: '#7a2828', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel || 'Value'} />
-                  {data.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel2 || 'Value 2'} />}
-                  {data.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill="transparent" dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel3 || 'Value 3'} />}
-                </AreaChart>
-              ) : data.type === 'multiLine' ? (
-                <AreaChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v: number) => `${v}%`} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={(value: number) => `${value}%`} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  <defs>
-                    <linearGradient id={multiLineFill1Id} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#1a365f" stopOpacity={0.12} /><stop offset="95%" stopColor="#1a365f" stopOpacity={0.01} /></linearGradient>
-                    <linearGradient id={multiLineFill2Id} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#b3822f" stopOpacity={0.12} /><stop offset="95%" stopColor="#b3822f" stopOpacity={0.01} /></linearGradient>
-                    <linearGradient id={multiLineFill3Id} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4c6b36" stopOpacity={0.12} /><stop offset="95%" stopColor="#4c6b36" stopOpacity={0.01} /></linearGradient>
-                  </defs>
-                  <Area type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} fill={`url(#${multiLineFill1Id})`} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel || 'Series 1'} />
-                  {data.dataKey2 && <Area type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} fill={`url(#${multiLineFill2Id})`} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel2 || 'Series 2'} />}
-                  {data.dataKey3 && <Area type="monotone" dataKey="value3" stroke="#4c6b36" strokeWidth={2.5} fill={`url(#${multiLineFill3Id})`} dot={{ r: 4, fill: '#4c6b36', strokeWidth: 2, stroke: '#fff' }} name={data.dataLabel3 || 'Series 3'} />}
-                </AreaChart>
-              ) : data.type === 'line' ? (
-                <LineChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} />
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  <Line type="monotone" dataKey="value" stroke="#1a365f" strokeWidth={2.5} dot={{ r: 4, fill: '#1a365f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel || 'Value'} />
-                  {data.dataKey2 && <Line type="monotone" dataKey="value2" stroke="#b3822f" strokeWidth={2.5} dot={{ r: 4, fill: '#b3822f', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} name={data.dataLabel2 || 'Value 2'} />}
-                </LineChart>
-              ) : data.type === 'pie' ? (
-                <PieChart width={renderWidth} height={chartHeight}>
-                  <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
-                  <Legend wrapperStyle={{ fontSize: '13px' }} />
-                  <Pie data={data.data} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={3} dataKey="value">
-                    {(data.data || []).map((_entry: any, index: number) => (
-                      <Cell key={`cell-${index}`} fill={['#1a365f', '#b3822f', '#a2bbc3', '#4c6b36', '#7a2828', '#1f5c7a'][index % 6]} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              ) : (
-                <BarChart width={renderWidth} height={chartHeight} data={data.data} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={data.yAxisPercent ? ((v: number) => `${v}%`) : undefined} />
-                  <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} formatter={data.yAxisPercent ? ((value: number) => `${value}%`) : undefined} />
-                  <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '13px' }} />
-                  <Bar dataKey="value" fill="#1a365f" radius={[4, 4, 0, 0]} name={data.dataLabel || 'Value'} />
-                  {data.dataKey2 && <Bar dataKey="value2" fill="#b3822f" radius={[4, 4, 0, 0]} name={data.dataLabel2 || 'Value 2'} />}
-                </BarChart>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {data.source && (
-          <p style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic', marginTop: '16px', lineHeight: 1.5 }}>
-            {data.source}
-          </p>
-        )}
-      </div>
-    </div>
-  );
-};
 
 const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [searchParams] = useSearchParams();
@@ -334,6 +118,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [isSavingToClient, setIsSavingToClient] = useState(false);
   const [savedClientName, setSavedClientName] = useState<string | null>(null);
   const [savedClientId, setSavedClientId] = useState<string | null>(null);
+  const [clientContext, setClientContext] = useState<{
+    writing_style?: string;
+    brand_tone?: string;
+    business_description?: string;
+    audience_type?: string;
+  } | null>(null);
 
   // Iframe Select & Fix State
   const [stableIframeSrcDoc, setStableIframeSrcDoc] = useState('');
@@ -362,7 +152,11 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const [complianceTeam, setComplianceTeam] = useState<{ id: string; name: string; email: string }[]>([]);
   const [complianceLoading, setComplianceLoading] = useState(false);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [isCopyingForBlog, setIsCopyingForBlog] = useState(false);
+  const [copyForBlogSuccess, setCopyForBlogSuccess] = useState(false);
   const [isApprovedLocked, setIsApprovedLocked] = useState(false);
+  const [complianceEditMode, setComplianceEditMode] = useState(false);
+  const [isSavingComplianceEdit, setIsSavingComplianceEdit] = useState(false);
 
   // Auto-lock content when status becomes APPROVED
   useEffect(() => {
@@ -473,16 +267,22 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       setSavedClientName(null);
       setSavedClientId(requestData.client_id || null);
 
-      // If a client was already assigned, load their name
+      // If a client was already assigned, load their name and voice context
       if (requestData.client_id) {
         setSavedClientName('Assigned Client');
         const { data: clientData, error: clientError } = await supabase
           .from('clients')
-          .select('name')
+          .select('name, writing_style, brand_tone, business_description, audience_type')
           .eq('id', requestData.client_id)
           .maybeSingle();
         if (!clientError && clientData?.name) {
           setSavedClientName(clientData.name);
+          setClientContext({
+            writing_style: clientData.writing_style || undefined,
+            brand_tone: clientData.brand_tone || undefined,
+            business_description: clientData.business_description || undefined,
+            audience_type: clientData.audience_type || undefined,
+          });
         }
       }
 
@@ -867,7 +667,25 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       throw requestError;
     }
     setRequestId(requestData.id);
-    if (parsedClientId) setSavedClientId(parsedClientId);
+    if (parsedClientId) {
+      setSavedClientId(parsedClientId);
+      // Fetch client voice context for new content
+      supabase
+        .from('clients')
+        .select('writing_style, brand_tone, business_description, audience_type')
+        .eq('id', parsedClientId)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data) {
+            setClientContext({
+              writing_style: data.writing_style || undefined,
+              brand_tone: data.brand_tone || undefined,
+              business_description: data.business_description || undefined,
+              audience_type: data.audience_type || undefined,
+            });
+          }
+        });
+    }
     return requestData.id;
   };
 
@@ -881,6 +699,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     source_payload?: CitationSourceItem[];
     source_limitations?: string;
     grounding_status?: 'grounded' | 'limited' | 'ungrounded' | null;
+    editor_id?: string;
   }) => {
     const sanitizeNoEmDashes = (input: string | null | undefined): string => {
       if (!input) return '';
@@ -913,6 +732,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         source_payload: payload.source_payload ?? [],
         source_limitations: payload.source_limitations ?? null,
         grounding_status: payload.grounding_status ?? null,
+        editor_id: payload.editor_id ?? null,
       })
       .select('*')
       .single();
@@ -1037,9 +857,108 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       setStatus(nextStatus);
       setReviews(prev => [reviewData as ComplianceReview, ...prev]);
+
+      // Send in-app notification to the advisor
+      if (profile.org_id) {
+        const { data: reqData } = await supabase
+          .from('content_requests')
+          .select('advisor_id, topic_text')
+          .eq('id', requestId)
+          .single();
+
+        if (reqData?.advisor_id) {
+          const titleMap: Record<string, string> = {
+            approved: 'Content approved',
+            changes_requested: 'Changes requested',
+            rejected: 'Content rejected',
+          };
+          const messageMap: Record<string, string> = {
+            approved: `Your content "${reqData.topic_text || 'Untitled'}" has been approved by compliance.`,
+            changes_requested: `Compliance has requested changes on "${reqData.topic_text || 'Untitled'}".`,
+            rejected: `Your content "${reqData.topic_text || 'Untitled'}" was rejected by compliance.`,
+          };
+          insertNotification({
+            org_id: profile.org_id,
+            user_id: reqData.advisor_id,
+            type: decision,
+            title: titleMap[decision] || 'Compliance update',
+            message: messageMap[decision] || 'A compliance decision was made on your content.',
+            link: `/content/${requestId}`,
+          });
+        }
+      }
     } catch (e: any) {
       console.error(e);
       setError(e.message || 'Failed to record compliance decision.');
+    }
+  };
+
+  const handleComplianceEditAndApprove = async () => {
+    if (!requestId || !profile?.id || !content) return;
+    setIsSavingComplianceEdit(true);
+    try {
+      setError(null);
+      const latestBodyRaw = editorRef.current?.innerHTML || content.body || '';
+      const latestBody = isBlogArticle
+        ? normalizeBlogBodyWithChartSlot(
+          latestBodyRaw.replace(/class="new-content-highlight"/g, '').trim(),
+          chartData,
+        )
+        : sanitizeBlogBodyForStorage(
+          latestBodyRaw.replace(/class="new-content-highlight"/g, '').trim()
+        );
+      const latestTitle = (content.title || '').trim();
+
+      // 1. Save as new version with editor_id
+      const savedVersion = await createContentVersion(requestId, {
+        generated_by: 'human',
+        title: latestTitle,
+        body: latestBody,
+        disclaimers: content.disclaimers,
+        chart_data: chartData,
+        citation_payload: citations,
+        source_payload: sources,
+        source_limitations: sourceLimitations,
+        grounding_status: groundingStatus,
+        editor_id: profile.id,
+      });
+
+      setContent(savedVersion);
+
+      // 2. Insert compliance review
+      const { data: reviewData, error: reviewError } = await supabase
+        .from('compliance_reviews')
+        .insert({
+          request_id: requestId,
+          reviewer_id: profile.id,
+          decision: 'approved',
+          notes: 'Edited and approved by compliance',
+        })
+        .select('id, decision, notes, reviewer_id, created_at')
+        .single();
+
+      if (reviewError) throw reviewError;
+
+      // 3. Update status to approved
+      const { error: requestUpdateError } = await supabase
+        .from('content_requests')
+        .update({
+          status: ContentStatus.APPROVED,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', requestId);
+
+      if (requestUpdateError) throw requestUpdateError;
+
+      setStatus(ContentStatus.APPROVED);
+      setReviews(prev => [reviewData as ComplianceReview, ...prev]);
+      setComplianceEditMode(false);
+      setIsApprovedLocked(true);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message || 'Failed to save compliance edit.');
+    } finally {
+      setIsSavingComplianceEdit(false);
     }
   };
 
@@ -1080,7 +999,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     setError(null);
 
     // Create specific instructions based on content type
-    let finalInstructions = instructions;
+    const safeTopic = sanitizeTopicInput(topic);
+    let finalInstructions = sanitizePromptInput(instructions);
     if (contentType === 'Social Media Post') {
       finalInstructions += " Format specifically for LinkedIn/Twitter with engaging hooks and hashtags.";
     } else if (contentType === 'Client Email') {
@@ -1098,7 +1018,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         setChartData(null);
         // IMAGE-ONLY mode: use the image provider directly
         const imageResponse: any = await triggerContentGeneration({
-          topic,
+          topic: safeTopic,
           contentType,
           instructions: finalInstructions || 'Generate a high-quality financial illustration.',
           provider: imageProvider,
@@ -1158,7 +1078,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           // Workaround: fire separate requests of count: 1 from the client
           const promises = Array(variationCount).fill(null).map((_, i) =>
             triggerContentGeneration({
-              topic,
+              topic: safeTopic,
               contentType,
               instructions: finalInstructions + (i > 0 ? `\n\nVARIATION INSTRUCTION: Make this variation distinct.` : ''),
               provider: textProvider,
@@ -1168,6 +1088,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
               requestId: currentRequestId,
               sourceUrls: selectedSourceUrls,
               ...(isVideoScript ? { videoDuration: contentLength === 'Short' ? shortDuration : undefined } : {}),
+              ...(clientContext ? { clientContext } : {}),
             }).catch(e => ({ error: true, message: e.message }))
           );
 
@@ -1198,7 +1119,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         } else {
           // Claude works fine making multiple variations on the edge
           generateResponse = await triggerContentGeneration({
-            topic,
+            topic: safeTopic,
             contentType,
             instructions: finalInstructions,
             provider: textProvider,
@@ -1208,6 +1129,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             requestId: currentRequestId,
             sourceUrls: selectedSourceUrls,
             ...(isVideoScript ? { videoDuration: contentLength === 'Short' ? shortDuration : undefined } : {}),
+            ...(clientContext ? { clientContext } : {}),
           });
         }
 
@@ -1268,7 +1190,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         if (generationMode === 'both' && savedVersion) {
           try {
             const imageResponse: any = await triggerContentGeneration({
-              topic,
+              topic: safeTopic,
               contentType,
               instructions: finalInstructions || 'Generate a high-quality financial illustration.',
               provider: imageProvider,
@@ -1361,9 +1283,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
     try {
       const imageResponse: any = await triggerContentGeneration({
-        topic,
+        topic: sanitizeTopicInput(topic),
         contentType,
-        instructions: instructions || 'Generate a high-quality financial illustration.',
+        instructions: sanitizePromptInput(instructions) || 'Generate a high-quality financial illustration.',
         provider: imageProvider,
         currentContent: content.body,
         count: variationCount,
@@ -1472,9 +1394,9 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const currentBodyText = content.body.replace(/<[^>]*>?/gm, '');
 
       const response: any = await triggerContentGeneration({
-        topic,
+        topic: sanitizeTopicInput(topic),
         contentType,
-        instructions,
+        instructions: sanitizePromptInput(instructions),
         provider: textProvider,
         contentLength,
         action: 'extend',
@@ -1482,6 +1404,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
         orgId: profile?.org_id,
         requestId: requestId || undefined,
         sourceUrls: parseSourceUrls(sourceUrlsInput),
+        ...(clientContext ? { clientContext } : {}),
       });
 
       setExtensionStep(EXTENSION_STEPS.length);
@@ -1624,11 +1547,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
       if (requestUpdateError) throw requestUpdateError;
 
-      // Block on the notification call so failures are visible to the user.
+      // Send email notification (edge function) and create in-app notification for the reviewer
       if (profile?.org_id) {
         await triggerReviewNotification({
           request_id: currentRequestId,
           org_id: profile.org_id,
+        });
+
+        // In-app notification for the assigned reviewer
+        insertNotification({
+          org_id: profile.org_id,
+          user_id: reviewerId,
+          type: 'review_submitted',
+          title: 'New content awaiting review',
+          message: `${profile.name || 'An advisor'} submitted "${topic || 'Untitled'}" for compliance review.`,
+          link: `/content/${currentRequestId}`,
         });
       }
 
@@ -2607,6 +2540,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           orgId: profile?.org_id,
           requestId: latestRequestIdRef.current || undefined,
           sourceUrls: parseSourceUrls(sourceUrlsInput),
+          ...(clientContext ? { clientContext } : {}),
         });
 
         const rawRewrite = response?.data?.body || response?.data?.title || fallbackText;
@@ -2663,6 +2597,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           orgId: profile?.org_id,
           requestId: latestRequestIdRef.current || undefined,
           sourceUrls: parseSourceUrls(sourceUrlsInput),
+          ...(clientContext ? { clientContext } : {}),
         });
 
         const rawRewrite = response?.data?.body || response?.data?.title || fallbackText;
@@ -3472,25 +3407,52 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
           {userRole === UserRole.COMPLIANCE && [ContentStatus.SUBMITTED, ContentStatus.IN_REVIEW, ContentStatus.APPROVED].includes(status) ? (
             <div className="flex gap-2">
-              <button
-                onClick={() => handleComplianceDecision('changes_requested')}
-                className="flex items-center gap-2 bg-white border border-amber-200 text-amber-700 hover:bg-amber-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
-              >
-                <MessageSquare size={16} /> Request Changes
-              </button>
-              <button
-                onClick={() => handleComplianceDecision('rejected')}
-                className="flex items-center gap-2 bg-white border border-red-200 text-red-700 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
-              >
-                <XCircle size={16} /> Reject
-              </button>
-              {status !== ContentStatus.APPROVED && (
-                <button
-                  onClick={() => handleComplianceDecision('approved')}
-                  className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
-                >
-                  <Check size={16} /> Approve
-                </button>
+              {complianceEditMode ? (
+                <>
+                  <button
+                    onClick={() => setComplianceEditMode(false)}
+                    className="flex items-center gap-2 bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                  >
+                    <X size={16} /> Cancel Edit
+                  </button>
+                  <button
+                    onClick={handleComplianceEditAndApprove}
+                    disabled={isSavingComplianceEdit}
+                    className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                  >
+                    {isSavingComplianceEdit ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
+                    {isSavingComplianceEdit ? 'Saving...' : 'Save & Approve'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => setComplianceEditMode(true)}
+                    className="flex items-center gap-2 bg-white border border-primary-200 text-primary-700 hover:bg-primary-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                  >
+                    <PenTool size={16} /> Edit Content
+                  </button>
+                  <button
+                    onClick={() => handleComplianceDecision('changes_requested')}
+                    className="flex items-center gap-2 bg-white border border-amber-200 text-amber-700 hover:bg-amber-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                  >
+                    <MessageSquare size={16} /> Request Changes
+                  </button>
+                  <button
+                    onClick={() => handleComplianceDecision('rejected')}
+                    className="flex items-center gap-2 bg-white border border-red-200 text-red-700 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                  >
+                    <XCircle size={16} /> Reject
+                  </button>
+                  {status !== ContentStatus.APPROVED && (
+                    <button
+                      onClick={() => handleComplianceDecision('approved')}
+                      className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm"
+                    >
+                      <Check size={16} /> Approve
+                    </button>
+                  )}
+                </>
               )}
             </div>
           ) : (status === ContentStatus.DRAFT || status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED) && (userRole === UserRole.ADVISOR || userRole === UserRole.ADMIN) ? (
@@ -3564,6 +3526,78 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                     {isSavingDraft ? <Loader2 size={16} className="animate-spin" /> : <Clipboard size={16} />}
                     Save Draft
                   </button>
+
+                  {contentType === 'blog' && content?.body && (
+                    <button
+                      onClick={async () => {
+                        setIsCopyingForBlog(true);
+                        setCopyForBlogSuccess(false);
+                        try {
+                          const iframeDoc = iframeRef.current?.contentDocument || iframeRef.current?.contentWindow?.document;
+                          if (!iframeDoc) throw new Error('No iframe document');
+                          const editorDiv = iframeDoc.querySelector('[contenteditable]') || iframeDoc.body;
+                          const clonedHtml = editorDiv.innerHTML;
+                          const tempDiv = document.createElement('div');
+                          tempDiv.innerHTML = clonedHtml;
+
+                          const chartSlots = iframeDoc.querySelectorAll('[data-cf-chart-slot="true"]');
+                          const clonedChartSlots = tempDiv.querySelectorAll('[data-cf-chart-slot="true"]');
+                          for (let i = 0; i < chartSlots.length; i++) {
+                            try {
+                              const canvas = await html2canvas(chartSlots[i] as HTMLElement, { useCORS: true, scale: 2 });
+                              const blob = await new Promise<Blob>((resolve, reject) => {
+                                canvas.toBlob((b) => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/png');
+                              });
+                              const imgUrl = await uploadBlobToImgBB(blob);
+                              const title = (chartSlots[i] as HTMLElement).getAttribute('data-chart-title') || 'Chart';
+                              if (clonedChartSlots[i]) {
+                                clonedChartSlots[i].outerHTML = `<img src="${imgUrl}" alt="${title}" style="max-width:100%;height:auto;" />`;
+                              }
+                            } catch (chartErr) {
+                              console.error('Chart conversion failed:', chartErr);
+                            }
+                          }
+
+                          const base64Imgs = tempDiv.querySelectorAll('img[src^="data:image"]');
+                          for (const img of Array.from(base64Imgs)) {
+                            try {
+                              const src = img.getAttribute('src') || '';
+                              const url = await uploadBase64ToImgBB(src);
+                              img.setAttribute('src', url);
+                            } catch (imgErr) {
+                              console.error('Base64 image upload failed:', imgErr);
+                            }
+                          }
+
+                          const finalHtml = tempDiv.innerHTML;
+                          const plainText = tempDiv.textContent || '';
+                          const blob = new Blob([finalHtml], { type: 'text/html' });
+                          const clipboardItem = new ClipboardItem({
+                            'text/html': blob,
+                            'text/plain': new Blob([plainText], { type: 'text/plain' }),
+                          });
+                          await navigator.clipboard.write([clipboardItem]);
+                          setCopyForBlogSuccess(true);
+                          setTimeout(() => setCopyForBlogSuccess(false), 3000);
+                        } catch (err) {
+                          console.error('Copy for Blog failed:', err);
+                          setError('Failed to copy for blog. Please try again.');
+                        } finally {
+                          setIsCopyingForBlog(false);
+                        }
+                      }}
+                      disabled={isCopyingForBlog}
+                      className="flex items-center gap-2 bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm disabled:opacity-50"
+                    >
+                      {isCopyingForBlog ? (
+                        <><Loader2 size={16} className="animate-spin" /> Preparing...</>
+                      ) : copyForBlogSuccess ? (
+                        <><CheckCircle2 size={16} /> Copied for blog!</>
+                      ) : (
+                        <><BookOpen size={16} /> Copy for Blog</>
+                      )}
+                    </button>
+                  )}
 
                   {savedClientName ? (
                     <button
@@ -3911,52 +3945,22 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             </div>
           )}
 
-          {/* Compliance Feedback Card */}
+          {/* Compliance Review History */}
           {reviews.length > 0 && (
-            <div className={`rounded-xl p-5 border shadow-sm ${reviews[0].decision === 'approved' ? 'bg-emerald-50 border-emerald-100' : 'bg-amber-50 border-amber-100'}`}>
-              {reviews[0].decision === 'approved' ? (
-                <>
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="w-9 h-9 rounded-full bg-emerald-500 flex items-center justify-center shadow-sm">
-                      <ShieldCheck size={18} className="text-white" />
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-sm text-emerald-900">Compliance Approved</h4>
-                      <p className="text-[11px] text-emerald-600">
-                        {lastReviewerName || 'Compliance Officer'}
-                        {reviews[0].created_at
-                          ? ` · ${new Date(reviews[0].created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
-                          : ''}
-                      </p>
-                    </div>
-                  </div>
-                  {reviews[0].notes && (
-                    <div className="bg-white/60 p-3 rounded-lg text-sm mb-2 border text-emerald-800 border-emerald-100/50">
-                      "{reviews[0].notes}"
-                    </div>
-                  )}
-                  <div className="flex items-center gap-2 mt-2">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-100 px-2.5 py-1 rounded-full border border-emerald-200 flex items-center gap-1">
-                      <Check size={10} strokeWidth={3} /> Approved
-                    </span>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <h4 className="font-semibold text-sm flex items-center gap-2 mb-3 text-amber-900">
-                    <MessageSquare size={16} /> Compliance Notes
-                  </h4>
-                  <div className="bg-white/60 p-3 rounded-lg text-sm mb-2 border text-amber-800 border-amber-100/50">
-                    "{reviews[0].notes}"
-                  </div>
-                  <div className="flex justify-between items-center text-xs mt-3">
-                    <span className="font-medium text-amber-700">
-                      Reviewer: {lastReviewerName || 'Compliance Officer'}
-                    </span>
-                    <StatusBadge status={ContentStatus.CHANGES_REQUESTED} />
-                  </div>
-                </>
-              )}
+            <div className="rounded-xl border border-slate-200 shadow-sm bg-white overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-100 bg-slate-50/50">
+                <h4 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                  <History size={15} /> Review History
+                </h4>
+              </div>
+              <div className="p-4">
+                <ApprovalTimeline
+                  reviews={reviews}
+                  reviewerNames={lastReviewerName && reviews[0]?.reviewer_id
+                    ? { [reviews[0].reviewer_id]: lastReviewerName }
+                    : undefined}
+                />
+              </div>
             </div>
           )}
 
@@ -4283,10 +4287,20 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                   </div>
                 )}
 
+                {/* Compliance Edit Mode Banner */}
+                {complianceEditMode && (
+                  <div className="flex items-center gap-3 bg-primary-50 border border-primary-200 rounded-xl px-4 py-3 mb-4">
+                    <PenTool size={16} className="text-primary-600 flex-shrink-0" />
+                    <p className="text-sm text-primary-800 font-medium">
+                      Compliance Edit Mode — Make your changes below, then click "Save & Approve" when done.
+                    </p>
+                  </div>
+                )}
+
                 <div
                   ref={editorRef}
-                  className="shrink-0 min-w-0 prose prose-slate prose-lg max-w-none focus:outline-none min-h-[300px] bg-white rounded-xl border border-slate-200 p-8 shadow-sm flow-root [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded-lg [&_img]:my-4"
-                  contentEditable
+                  className={`shrink-0 min-w-0 prose prose-slate prose-lg max-w-none focus:outline-none min-h-[300px] bg-white rounded-xl border p-8 shadow-sm flow-root [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded-lg [&_img]:my-4 ${complianceEditMode ? 'border-primary-300 ring-2 ring-primary-100' : 'border-slate-200'}`}
+                  contentEditable={userRole !== UserRole.COMPLIANCE || complianceEditMode}
                   suppressContentEditableWarning
                   dangerouslySetInnerHTML={{ __html: content.body }}
                   onClick={(event) => {
