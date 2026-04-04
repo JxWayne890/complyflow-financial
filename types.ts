@@ -47,6 +47,10 @@ export interface Client {
   notes?: string;
   avatar_url?: string;
   status: ClientStatus;
+  writing_style?: string;
+  brand_tone?: string;
+  business_description?: string;
+  content_preferences?: Record<string, any>;
   created_at: string;
 }
 
@@ -101,6 +105,7 @@ export interface ContentVersion {
   source_payload?: CitationSourceItem[] | null;
   source_limitations?: string | null;
   grounding_status?: 'grounded' | 'limited' | 'ungrounded' | null;
+  editor_id?: string;
   created_at: string;
 }
 
@@ -157,9 +162,36 @@ export interface SocialVariant {
   hashtags: string;
 }
 
-export type Notification = {
+export type NotificationType = 'review_submitted' | 'approved' | 'changes_requested' | 'rejected';
+
+export interface Notification {
   id: string;
+  org_id: string;
+  user_id: string;
+  type: NotificationType;
+  title: string;
   message: string;
-  date: string;
+  link?: string;
   read: boolean;
-};
+  created_at: string;
+}
+
+export interface Asset {
+  id: string;
+  request_id: string;
+  asset_type: 'image' | 'video';
+  provider: string;
+  url: string | null;
+  metadata?: Record<string, any>;
+  created_at: string;
+}
+
+export interface PostingJob {
+  id: string;
+  request_id: string;
+  platform: string;
+  status: 'pending' | 'processing' | 'posted' | 'failed';
+  provider: string;
+  external_job_id?: string;
+  created_at: string;
+}
