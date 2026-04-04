@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
 import { createRoot, Root } from 'react-dom/client';
-import { triggerContentGeneration, triggerReviewNotification, triggerSocialPost, triggerVideoGeneration, insertNotification, supabase } from '../services/supabaseClient';
+import { triggerContentGeneration, triggerReviewNotification, triggerSocialPost, triggerVideoGeneration, insertNotification, ensureSignedInSession, supabase } from '../services/supabaseClient';
 import { UserRole, ContentStatus, ContentVersion, ComplianceReview, ComplianceHighlight, Profile, Client, CitationPayloadItem, CitationSourceItem } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import {
@@ -96,6 +96,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   const existingId = searchParams.get('existingId');
   const [requestId, setRequestId] = useState<string | null>(id || existingId || null);
   const clientId = searchParams.get('clientId');
+  const clientNameParam = searchParams.get('clientName');
 
   // State
   const [topic, setTopic] = useState(searchParams.get('topic') || '');
@@ -173,6 +174,32 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       setIsApprovedLocked(true);
     }
   }, [status]);
+
+  // Initialize client context from URL params (new content flow)
+  useEffect(() => {
+    if (clientId && clientId !== 'null' && !id && !existingId) {
+      setSavedClientId(clientId);
+      if (clientNameParam) {
+        setSavedClientName(decodeURIComponent(clientNameParam));
+      }
+      supabase
+        .from('clients')
+        .select('name, writing_style, brand_tone, business_description, audience_type')
+        .eq('id', clientId)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data) {
+            setSavedClientName(data.name);
+            setClientContext({
+              writing_style: data.writing_style || undefined,
+              brand_tone: data.brand_tone || undefined,
+              business_description: data.business_description || undefined,
+              audience_type: data.audience_type || undefined,
+            });
+          }
+        });
+    }
+  }, []);
 
   // Resizable Notes Panel State
   const MIN_NOTES_WIDTH = 250;
@@ -610,6 +637,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   }, [complianceHighlights]);
 
   const ensureRequestId = async (): Promise<string> => {
+    await ensureSignedInSession();
+
     if (!profile?.id || !profile?.org_id) {
       throw new Error('Missing profile or organization context. Please log in again.');
     }
@@ -710,6 +739,8 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     grounding_status?: 'grounded' | 'limited' | 'ungrounded' | null;
     editor_id?: string;
   }) => {
+    await ensureSignedInSession();
+
     const sanitizeNoEmDashes = (input: string | null | undefined): string => {
       if (!input) return '';
       return input
@@ -1021,6 +1052,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     const selectedSourceUrls = parseSourceUrls(sourceUrlsInput);
 
     try {
+      await ensureSignedInSession();
       const currentRequestId = await ensureRequestId();
 
       if (generationMode === 'image') {
@@ -1291,6 +1323,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     setShowImageSelection(false);
 
     try {
+      await ensureSignedInSession();
       const imageResponse: any = await triggerContentGeneration({
         topic: sanitizeTopicInput(topic),
         contentType,
@@ -1400,6 +1433,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     const previousBody = content.body;
 
     try {
+      await ensureSignedInSession();
       const currentBodyText = content.body.replace(/<[^>]*>?/gm, '');
 
       const response: any = await triggerContentGeneration({
@@ -1624,12 +1658,12 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
     z-index: 2147483646;
     display: none;
     align-items: center;
-    gap: 6px;
-    padding: 6px;
-    border-radius: 999px;
+    gap: 2px;
+    padding: 4px;
+    border-radius: 14px;
     background: #0f172a;
     border: 1px solid #334155;
-    box-shadow: 0 10px 24px rgba(2, 6, 23, 0.35);
+    box-shadow: 0 8px 32px rgba(2, 6, 23, 0.45), 0 0 0 1px rgba(51, 65, 85, 0.3);
     color: #e2e8f0;
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
     user-select: none;
@@ -1637,25 +1671,32 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
   .cf-pill.cf-visible { display: inline-flex; }
   .cf-pill button {
     border: 0;
-    border-radius: 999px;
-    padding: 7px 12px;
+    border-radius: 10px;
+    padding: 6px 10px;
     background: transparent;
-    color: #e2e8f0;
-    font-size: 12px;
+    color: #94a3b8;
+    font-size: 11px;
     font-weight: 600;
     line-height: 1;
     cursor: pointer;
-    transition: background 120ms ease;
+    transition: all 150ms ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
   }
-  .cf-pill button:hover { background: #334155; }
+  .cf-pill button:hover { background: #1e293b; color: #f1f5f9; }
+  .cf-pill button:active { background: #334155; }
   .cf-pill button:disabled {
-    opacity: 0.6;
+    opacity: 0.5;
     cursor: wait;
   }
+  .cf-pill button svg { width: 13px; height: 13px; flex-shrink: 0; }
   .cf-pill .cf-divider {
     width: 1px;
-    height: 20px;
-    background: #475569;
+    height: 18px;
+    background: #334155;
+    margin: 0 2px;
   }
   .cf-pill .cf-note {
     display: none;
@@ -1755,26 +1796,27 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 <div id="cfIframePill" class="cf-pill" role="toolbar" aria-label="Select and fix toolbar">
   ${isComplianceNoteOnlyPill ? `
   ${canAddComplianceHighlights ? `
-  <button type="button" id="cfHighlightToggle">Add Note</button>
+  <button type="button" id="cfHighlightToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Note</button>
   <form class="cf-highlight-note" id="cfHighlightForm">
     <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
     <button type="submit" id="cfHighlightSave">Save</button>
   </form>
   ` : '<span class="cf-note-disabled">Highlights are unavailable for this status.</span>'}
   ` : `
-  <button type="button" data-mode="rewrite">Rewrite</button>
-  <button type="button" data-mode="shorten">Shorten</button>
-  <button type="button" data-mode="expand">Expand</button>
-  <button type="button" id="cfManualToggle">Edit Text Manually</button>
-  <button type="button" id="cfPromptToggle">Prompt AI</button>
+  <button type="button" data-mode="rewrite"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>Rewrite</button>
+  <button type="button" data-mode="shorten"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>Shorten</button>
+  <button type="button" data-mode="expand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>Expand</button>
   <div class="cf-divider"></div>
-  <button type="button" id="cfComplianceToggle">Fix Compliance</button>
+  <button type="button" id="cfManualToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>Edit</button>
+  <button type="button" id="cfPromptToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>Prompt</button>
+  <div class="cf-divider"></div>
+  <button type="button" id="cfComplianceToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>Compliance</button>
   <form class="cf-note" id="cfComplianceForm">
     <input type="text" id="cfComplianceInput" placeholder="Compliance note..." />
     <button type="submit">Fix</button>
   </form>
   ${canAddComplianceHighlights ? `
-  <button type="button" id="cfHighlightToggle">Add Note</button>
+  <button type="button" id="cfHighlightToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Note</button>
   <form class="cf-highlight-note" id="cfHighlightForm">
     <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
     <button type="submit" id="cfHighlightSave">Save</button>
@@ -2036,7 +2078,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const pillMarkup = `
           ${isComplianceNoteOnlyPill ? `
           ${canAddComplianceHighlights ? `
-          <button type="button" id="cfHighlightToggle">Add Note</button>
+          <button type="button" id="cfHighlightToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Note</button>
           <form class="cf-highlight-note" id="cfHighlightForm">
             <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
             <button type="submit" id="cfHighlightSave">Save</button>
@@ -2049,13 +2091,13 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
           <button type="button" id="cfManualToggle">Edit Text Manually</button>
           <button type="button" id="cfPromptToggle">Prompt AI</button>
           <div class="cf-divider"></div>
-          <button type="button" id="cfComplianceToggle">Fix Compliance</button>
+          <button type="button" id="cfComplianceToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>Compliance</button>
           <form class="cf-note" id="cfComplianceForm">
             <input type="text" id="cfComplianceInput" placeholder="Compliance note..." />
             <button type="submit">Fix</button>
           </form>
           ${canAddComplianceHighlights ? `
-          <button type="button" id="cfHighlightToggle">Add Note</button>
+          <button type="button" id="cfHighlightToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Note</button>
           <form class="cf-highlight-note" id="cfHighlightForm">
             <input type="text" id="cfHighlightInput" placeholder="Note for advisor..." />
             <button type="submit" id="cfHighlightSave">Save</button>
@@ -2536,6 +2578,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const fallbackText = selectedText;
       setBusyState(true);
       try {
+        await ensureSignedInSession();
         const rewriteContext = rewriteContextRef.current;
         const response: any = await triggerContentGeneration({
           topic: rewriteContext.topic,
@@ -2585,6 +2628,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
       const fallbackText = selectedText;
       setBusyState(true);
       try {
+        await ensureSignedInSession();
         const rewriteContext = rewriteContextRef.current;
         const promptScopedInstructions = [
           rewriteContext.instructions || '',
@@ -3400,6 +3444,21 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
+      {/* Client Context Banner */}
+      {savedClientName && (
+        <div className="flex items-center justify-between bg-primary-50 border border-primary-200 rounded-xl px-5 py-3 mb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center text-white text-xs font-bold">
+              {savedClientName.split(' ').map((n: string) => n[0]).join('').toUpperCase().slice(0, 2)}
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-primary-900">Creating content for {savedClientName}</p>
+              <p className="text-xs text-primary-600">Content and compliance review is tied to this client</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Back & Status Header */}
       <div className="mb-6 flex items-center justify-between">
         <button onClick={() => navigate(-1)} className="text-slate-500 hover:text-slate-800 flex items-center gap-1 text-sm font-medium transition-colors">
@@ -3549,24 +3608,35 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                           const tempDiv = document.createElement('div');
                           tempDiv.innerHTML = clonedHtml;
 
-                          const chartSlots = iframeDoc.querySelectorAll('[data-cf-chart-slot="true"]');
-                          const clonedChartSlots = tempDiv.querySelectorAll('[data-cf-chart-slot="true"]');
-                          for (let i = 0; i < chartSlots.length; i++) {
-                            try {
-                              const canvas = await html2canvas(chartSlots[i] as HTMLElement, { useCORS: true, scale: 2 });
-                              const blob = await new Promise<Blob>((resolve, reject) => {
-                                canvas.toBlob((b) => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/png');
-                              });
-                              const imgUrl = await uploadBlobToImgBB(blob);
-                              const title = (chartSlots[i] as HTMLElement).getAttribute('data-chart-title') || 'Chart';
-                              if (clonedChartSlots[i]) {
-                                clonedChartSlots[i].outerHTML = `<img src="${imgUrl}" alt="${title}" style="max-width:100%;height:auto;" />`;
+                          // Convert chart to image if chart data exists
+                          if (chartData) {
+                            const chartSlots = tempDiv.querySelectorAll('[data-cf-chart-slot="true"]');
+                            if (chartSlots.length > 0) {
+                              try {
+                                const offscreen = document.createElement('div');
+                                offscreen.style.cssText = 'position:fixed;left:-9999px;top:0;width:700px;background:#fff;padding:16px;';
+                                document.body.appendChild(offscreen);
+                                const tempRoot = createRoot(offscreen);
+                                tempRoot.render(<ChartCard data={chartData} inline={false} />);
+                                await new Promise(r => setTimeout(r, 500));
+                                const canvas = await html2canvas(offscreen, { useCORS: true, scale: 2, backgroundColor: '#ffffff' });
+                                tempRoot.unmount();
+                                document.body.removeChild(offscreen);
+                                const pngBlob = await new Promise<Blob>((resolve, reject) => {
+                                  canvas.toBlob((b) => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/png');
+                                });
+                                const imgUrl = await uploadBlobToImgBB(pngBlob);
+                                const chartTitle = chartData.title || 'Chart';
+                                chartSlots.forEach((slot) => {
+                                  slot.outerHTML = `<img src="${imgUrl}" alt="${chartTitle}" style="max-width:100%;height:auto;border-radius:8px;" />`;
+                                });
+                              } catch (chartErr) {
+                                console.error('Chart conversion failed:', chartErr);
                               }
-                            } catch (chartErr) {
-                              console.error('Chart conversion failed:', chartErr);
                             }
                           }
 
+                          // Upload any remaining base64 images
                           const base64Imgs = tempDiv.querySelectorAll('img[src^="data:image"]');
                           for (const img of Array.from(base64Imgs)) {
                             try {
@@ -3578,11 +3648,17 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                             }
                           }
 
+                          // Clean up editing artifacts
+                          tempDiv.querySelectorAll('script, .cf-pill, [contenteditable]').forEach(el => {
+                            if (el.tagName === 'SCRIPT') el.remove();
+                            else el.removeAttribute('contenteditable');
+                          });
+
                           const finalHtml = tempDiv.innerHTML;
                           const plainText = tempDiv.textContent || '';
-                          const blob = new Blob([finalHtml], { type: 'text/html' });
+                          const htmlBlob = new Blob([finalHtml], { type: 'text/html' });
                           const clipboardItem = new ClipboardItem({
-                            'text/html': blob,
+                            'text/html': htmlBlob,
                             'text/plain': new Blob([plainText], { type: 'text/plain' }),
                           });
                           await navigator.clipboard.write([clipboardItem]);
@@ -3618,7 +3694,7 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
                         ? `Resubmit to ${lastReviewerName}`
                         : status === ContentStatus.CHANGES_REQUESTED || status === ContentStatus.APPROVED
                           ? 'Resubmit for Review'
-                          : 'Submit for Review'} <Send size={16} />
+                          : `Submit for ${savedClientName}`} <Send size={16} />
                     </button>
                   ) : (
                     <button
@@ -3653,13 +3729,6 @@ const ContentEditor: React.FC<ContentEditorProps> = ({ userRole, profile }) => {
             <StatusBadge status={status} />
           )}
 
-          {/* Optional display for saved client name right next to status */}
-          {content && savedClientName && (
-            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-2 rounded-lg text-sm font-medium shadow-sm ml-2">
-              <CheckCircle2 size={16} />
-              Saved to {savedClientName}
-            </div>
-          )}
         </div>
       </div>
 

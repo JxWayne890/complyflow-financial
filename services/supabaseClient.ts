@@ -10,7 +10,84 @@ if (!supabaseUrl || !supabaseAnonKey) {
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    autoRefreshToken: true,
+    persistSession: true,
+    detectSessionInUrl: true,
+  },
+});
+
+const publicEdgeFunctionClient = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+    detectSessionInUrl: false,
+  },
+  global: {
+    headers: {
+      Authorization: `Bearer ${supabaseAnonKey}`,
+    },
+  },
+});
+
+const isJwtAuthError = (error: any) => {
+  const text = [
+    error?.message,
+    error?.error_description,
+    error?.details,
+    error?.hint,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  return (
+    text.includes('invalid jwt') ||
+    text.includes('jwt expired') ||
+    text.includes('expired jwt') ||
+    text.includes('invalid claim') ||
+    text.includes('bad_jwt')
+  );
+};
+
+const refreshCurrentSession = async () => {
+  const { data, error } = await supabase.auth.refreshSession();
+  if (error) {
+    console.error('Failed to refresh session:', error);
+    return null;
+  }
+  return data.session;
+};
+
+export const ensureFreshSession = async () => {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return null;
+  const expiresAt = session.expires_at ?? 0;
+  const now = Math.floor(Date.now() / 1000);
+  if (expiresAt - now < 60) {
+    return refreshCurrentSession();
+  }
+
+  const { error: validationError } = await supabase.auth.getUser();
+  if (validationError) {
+    if (isJwtAuthError(validationError)) {
+      return refreshCurrentSession();
+    }
+
+    console.error('Failed to validate current session:', validationError);
+  }
+
+  return session;
+};
+
+export const ensureSignedInSession = async () => {
+  const session = await ensureFreshSession();
+  if (!session?.user) {
+    throw new Error('Your session expired. Please sign in again.');
+  }
+  return session;
+};
 
 export const extractFunctionErrorMessage = async (error: any): Promise<string> => {
   if (!error) return 'Unknown function error';
@@ -61,7 +138,7 @@ export const triggerContentGeneration = async (payload: {
     audience_type?: string;
   };
 }) => {
-  const { data, error } = await supabase.functions.invoke('generate-content', {
+  const { data, error } = await publicEdgeFunctionClient.functions.invoke('generate-content', {
     body: payload,
   });
 
@@ -83,7 +160,7 @@ export const triggerTopicGeneration = async (
   existingTopics: string[],
   provider: 'claude' | 'kimi' = 'claude',
 ) => {
-  const { data, error } = await supabase.functions.invoke('generate-topics', {
+  const { data, error } = await publicEdgeFunctionClient.functions.invoke('generate-topics', {
     body: { existingTopics, provider },
   });
 
@@ -158,6 +235,7 @@ export const triggerSocialPost = async (payload: {
   image_url?: string;
   client_id: string;
 }) => {
+  await ensureFreshSession();
   const { data, error } = await supabase.functions.invoke('post-to-social', {
     body: payload,
   });
@@ -178,6 +256,7 @@ export const triggerVideoGeneration = async (payload: {
   avatar_id?: string;
   voice_id?: string;
 }) => {
+  await ensureFreshSession();
   const { data, error } = await supabase.functions.invoke('generate-video', {
     body: payload,
   });
@@ -195,6 +274,7 @@ export const triggerReviewNotification = async (payload: {
   request_id: string;
   org_id: string;
 }) => {
+  await ensureFreshSession();
   const { data, error } = await supabase.functions.invoke('notify-review', {
     body: payload,
   });

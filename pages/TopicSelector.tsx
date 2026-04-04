@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, ChevronRight, TrendingUp, DollarSign, Heart, Briefcase, Zap, Shield, Landmark, Building2, Flame, Leaf, Atom, PiggyBank, Users, BookOpen, Scale, Sparkles, Loader2, CheckCircle2, Brain, ShieldCheck, Lightbulb, ListChecks, FileCheck, PlusCircle } from 'lucide-react';
-import { supabase } from '../services/supabaseClient';
-import { triggerTopicGeneration } from '../services/supabaseClient';
+import { ensureSignedInSession, supabase, triggerTopicGeneration } from '../services/supabaseClient';
 import { Profile, UserRole } from '../types';
 
 // Generation progress steps
@@ -186,6 +185,7 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
     setCustomTopicSuccess(null);
     setIsSavingCustomTopic(true);
     try {
+      await ensureSignedInSession();
       const insertPayload: any = {
         topic: trimmedTopic,
         category: customCategory || 'Personal Finance',
@@ -232,6 +232,7 @@ const TopicSelector: React.FC<{ profile: Profile | null }> = ({ profile }) => {
     setGenStep(0);
     setGenerateError(null);
     try {
+      await ensureSignedInSession();
       const existingTopicStrings = topics.map(t => t.topic);
       const result = await triggerTopicGeneration(existingTopicStrings, topicProvider);
 
